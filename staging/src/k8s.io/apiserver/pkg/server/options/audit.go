@@ -22,11 +22,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 	"gopkg.in/natefinch/lumberjack.v2"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	auditv1alpha1 "k8s.io/apiserver/pkg/apis/audit/v1alpha1"
+	auditv1beta1 "k8s.io/apiserver/pkg/apis/audit/v1beta1"
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/audit/policy"
 	"k8s.io/apiserver/pkg/features"
@@ -58,8 +58,9 @@ type AuditOptions struct {
 	WebhookOptions AuditWebhookOptions
 }
 
-// AuditLogOptions holds the legacy audit log writer. If the AdvancedAuditing feature
-// is enabled, these options determine the output of the structured audit log.
+// AuditLogOptions determines the output of the structured audit log by default.
+// If the AdvancedAuditing feature is set to false, AuditLogOptions holds the legacy
+// audit log writer.
 type AuditLogOptions struct {
 	Path       string
 	MaxAge     int
@@ -76,17 +77,26 @@ type AuditWebhookOptions struct {
 	//
 	// Defaults to asynchronous batch events.
 	Mode string
+	// Configuration for batching webhook. Only used in batch mode.
+	BatchConfig pluginwebhook.BatchBackendConfig
 }
 
 func NewAuditOptions() *AuditOptions {
 	return &AuditOptions{
-		WebhookOptions: AuditWebhookOptions{Mode: pluginwebhook.ModeBatch},
-		LogOptions:     AuditLogOptions{Format: pluginlog.FormatLegacy},
+		WebhookOptions: AuditWebhookOptions{
+			Mode:        pluginwebhook.ModeBatch,
+			BatchConfig: pluginwebhook.NewDefaultBatchBackendConfig(),
+		},
+		LogOptions: AuditLogOptions{Format: pluginlog.FormatJson},
 	}
 }
 
 // Validate checks invalid config combination
 func (o *AuditOptions) Validate() []error {
+	if o == nil {
+		return nil
+	}
+
 	allErrors := []error{}
 
 	if !advancedAuditingEnabled() {
@@ -97,7 +107,7 @@ func (o *AuditOptions) Validate() []error {
 			allErrors = append(allErrors, fmt.Errorf("feature '%s' must be enabled to set option --audit-webhook-config-file", features.AdvancedAuditing))
 		}
 	} else {
-		// check webhook mode
+		// Check webhook mode
 		validMode := false
 		for _, m := range pluginwebhook.AllowedModes {
 			if m == o.WebhookOptions.Mode {
@@ -109,7 +119,21 @@ func (o *AuditOptions) Validate() []error {
 			allErrors = append(allErrors, fmt.Errorf("invalid audit webhook mode %s, allowed modes are %q", o.WebhookOptions.Mode, strings.Join(pluginwebhook.AllowedModes, ",")))
 		}
 
-		// check log format
+		// Check webhook batch configuration
+		if o.WebhookOptions.BatchConfig.BufferSize <= 0 {
+			allErrors = append(allErrors, fmt.Errorf("invalid audit batch webhook buffer size %v, must be a positive number", o.WebhookOptions.BatchConfig.BufferSize))
+		}
+		if o.WebhookOptions.BatchConfig.MaxBatchSize <= 0 {
+			allErrors = append(allErrors, fmt.Errorf("invalid audit batch webhook max batch size %v, must be a positive number", o.WebhookOptions.BatchConfig.MaxBatchSize))
+		}
+		if o.WebhookOptions.BatchConfig.ThrottleQPS <= 0 {
+			allErrors = append(allErrors, fmt.Errorf("invalid audit batch webhook throttle QPS %v, must be a positive number", o.WebhookOptions.BatchConfig.ThrottleQPS))
+		}
+		if o.WebhookOptions.BatchConfig.ThrottleBurst <= 0 {
+			allErrors = append(allErrors, fmt.Errorf("invalid audit batch webhook throttle burst %v, must be a positive number", o.WebhookOptions.BatchConfig.ThrottleBurst))
+		}
+
+		// Check log format
 		validFormat := false
 		for _, f := range pluginlog.AllowedFormats {
 			if f == o.LogOptions.Format {
@@ -137,6 +161,10 @@ func (o *AuditOptions) Validate() []error {
 }
 
 func (o *AuditOptions) AddFlags(fs *pflag.FlagSet) {
+	if o == nil {
+		return
+	}
+
 	fs.StringVar(&o.PolicyFile, "audit-policy-file", o.PolicyFile,
 		"Path to the file that defines the audit policy configuration. Requires the 'AdvancedAuditing' feature gate."+
 			" With AdvancedAuditing, a profile is required to enable auditing.")
@@ -146,6 +174,10 @@ func (o *AuditOptions) AddFlags(fs *pflag.FlagSet) {
 }
 
 func (o *AuditOptions) ApplyTo(c *server.Config) error {
+	if o == nil {
+		return nil
+	}
+
 	// Apply legacy audit options if advanced audit is not enabled.
 	if !advancedAuditingEnabled() {
 		return o.LogOptions.legacyApplyTo(c)
@@ -163,6 +195,10 @@ func (o *AuditOptions) ApplyTo(c *server.Config) error {
 	}
 	if err := o.WebhookOptions.applyTo(c); err != nil {
 		return err
+	}
+
+	if c.AuditBackend != nil && c.AuditPolicyChecker == nil {
+		glog.V(2).Info("No audit policy file provided for AdvancedAuditing, no events will be recorded.")
 	}
 	return nil
 }
@@ -214,7 +250,7 @@ func (o *AuditLogOptions) getWriter() io.Writer {
 
 func (o *AuditLogOptions) advancedApplyTo(c *server.Config) error {
 	if w := o.getWriter(); w != nil {
-		c.AuditBackend = appendBackend(c.AuditBackend, pluginlog.NewBackend(w, o.Format))
+		c.AuditBackend = appendBackend(c.AuditBackend, pluginlog.NewBackend(w, o.Format, auditv1beta1.SchemeGroupVersion))
 	}
 	return nil
 }
@@ -232,6 +268,24 @@ func (o *AuditWebhookOptions) AddFlags(fs *pflag.FlagSet) {
 		"Strategy for sending audit events. Blocking indicates sending events should block"+
 			" server responses. Batch causes the webhook to buffer and send events"+
 			" asynchronously. Known modes are "+strings.Join(pluginwebhook.AllowedModes, ",")+".")
+	fs.IntVar(&o.BatchConfig.BufferSize, "audit-webhook-batch-buffer-size",
+		o.BatchConfig.BufferSize, "The size of the buffer to store events before "+
+			"batching and sending to the webhook. Only used in batch mode.")
+	fs.IntVar(&o.BatchConfig.MaxBatchSize, "audit-webhook-batch-max-size",
+		o.BatchConfig.MaxBatchSize, "The maximum size of a batch sent to the webhook. "+
+			"Only used in batch mode.")
+	fs.DurationVar(&o.BatchConfig.MaxBatchWait, "audit-webhook-batch-max-wait",
+		o.BatchConfig.MaxBatchWait, "The amount of time to wait before force sending the "+
+			"batch that hadn't reached the max size. Only used in batch mode.")
+	fs.Float32Var(&o.BatchConfig.ThrottleQPS, "audit-webhook-batch-throttle-qps",
+		o.BatchConfig.ThrottleQPS, "Maximum average number of requests per second. "+
+			"Only used in batch mode.")
+	fs.IntVar(&o.BatchConfig.ThrottleBurst, "audit-webhook-batch-throttle-burst",
+		o.BatchConfig.ThrottleBurst, "Maximum number of requests sent at the same "+
+			"moment if ThrottleQPS was not utilized before. Only used in batch mode.")
+	fs.DurationVar(&o.BatchConfig.InitialBackoff, "audit-webhook-batch-initial-backoff",
+		o.BatchConfig.InitialBackoff, "The amount of time to wait before retrying the "+
+			"first failed requests. Only used in batch mode.")
 }
 
 func (o *AuditWebhookOptions) applyTo(c *server.Config) error {
@@ -239,8 +293,7 @@ func (o *AuditWebhookOptions) applyTo(c *server.Config) error {
 		return nil
 	}
 
-	// TODO: switch to beta
-	webhook, err := pluginwebhook.NewBackend(o.ConfigFile, o.Mode, []schema.GroupVersion{auditv1alpha1.SchemeGroupVersion})
+	webhook, err := pluginwebhook.NewBackend(o.ConfigFile, o.Mode, auditv1beta1.SchemeGroupVersion, o.BatchConfig)
 	if err != nil {
 		return fmt.Errorf("initializing audit webhook: %v", err)
 	}

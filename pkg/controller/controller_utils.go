@@ -38,15 +38,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	ref "k8s.io/client-go/tools/reference"
 	"k8s.io/client-go/util/integer"
 	clientretry "k8s.io/client-go/util/retry"
-	_ "k8s.io/kubernetes/pkg/api/install"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"k8s.io/kubernetes/pkg/api/validation"
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 	hashutil "k8s.io/kubernetes/pkg/util/hash"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 
@@ -65,6 +63,21 @@ const (
 	// 500 pods. Just creation is limited to 20qps, and watching happens with ~10-30s
 	// latency/pod at the scale of 3000 pods over 100 nodes.
 	ExpectationsTimeout = 5 * time.Minute
+	// When batching pod creates, SlowStartInitialBatchSize is the size of the
+	// inital batch.  The size of each successive batch is twice the size of
+	// the previous batch.  For example, for a value of 1, batch sizes would be
+	// 1, 2, 4, 8, ...  and for a value of 10, batch sizes would be
+	// 10, 20, 40, 80, ...  Setting the value higher means that quota denials
+	// will result in more doomed API calls and associated event spam.  Setting
+	// the value lower will result in more API call round trip periods for
+	// large batches.
+	//
+	// Given a number of pods to start "N":
+	// The number of doomed calls per sync once quota is exceeded is given by:
+	//      min(N,SlowStartInitialBatchSize)
+	// The number of batches is given by:
+	//      1+floor(log_2(ceil(N/SlowStartInitialBatchSize)))
+	SlowStartInitialBatchSize = 1
 )
 
 var UpdateTaintBackoff = wait.Backoff{
@@ -397,7 +410,7 @@ type RealRSControl struct {
 var _ RSControlInterface = &RealRSControl{}
 
 func (r RealRSControl) PatchReplicaSet(namespace, name string, data []byte) error {
-	_, err := r.KubeClient.Extensions().ReplicaSets(namespace).Patch(name, types.StrategicMergePatchType, data)
+	_, err := r.KubeClient.ExtensionsV1beta1().ReplicaSets(namespace).Patch(name, types.StrategicMergePatchType, data)
 	return err
 }
 
@@ -459,29 +472,12 @@ func getPodsFinalizers(template *v1.PodTemplateSpec) []string {
 	return desiredFinalizers
 }
 
-func getPodsAnnotationSet(template *v1.PodTemplateSpec, object runtime.Object) (labels.Set, error) {
+func getPodsAnnotationSet(template *v1.PodTemplateSpec) labels.Set {
 	desiredAnnotations := make(labels.Set)
 	for k, v := range template.Annotations {
 		desiredAnnotations[k] = v
 	}
-	createdByRef, err := ref.GetReference(scheme.Scheme, object)
-	if err != nil {
-		return desiredAnnotations, fmt.Errorf("unable to get controller reference: %v", err)
-	}
-
-	// TODO: this code was not safe previously - as soon as new code came along that switched to v2, old clients
-	//   would be broken upon reading it. This is explicitly hardcoded to v1 to guarantee predictable deployment.
-	//   We need to consistently handle this case of annotation versioning.
-	codec := scheme.Codecs.LegacyCodec(v1.SchemeGroupVersion)
-
-	createdByRefJson, err := runtime.Encode(codec, &v1.SerializedReference{
-		Reference: *createdByRef,
-	})
-	if err != nil {
-		return desiredAnnotations, fmt.Errorf("unable to serialize controller reference: %v", err)
-	}
-	desiredAnnotations[v1.CreatedByAnnotation] = string(createdByRefJson)
-	return desiredAnnotations, nil
+	return desiredAnnotations
 }
 
 func getPodsPrefix(controllerName string) string {
@@ -531,17 +527,14 @@ func (r RealPodControl) CreatePodsOnNode(nodeName, namespace string, template *v
 }
 
 func (r RealPodControl) PatchPod(namespace, name string, data []byte) error {
-	_, err := r.KubeClient.Core().Pods(namespace).Patch(name, types.StrategicMergePatchType, data)
+	_, err := r.KubeClient.CoreV1().Pods(namespace).Patch(name, types.StrategicMergePatchType, data)
 	return err
 }
 
 func GetPodFromTemplate(template *v1.PodTemplateSpec, parentObject runtime.Object, controllerRef *metav1.OwnerReference) (*v1.Pod, error) {
 	desiredLabels := getPodsLabelSet(template)
 	desiredFinalizers := getPodsFinalizers(template)
-	desiredAnnotations, err := getPodsAnnotationSet(template, parentObject)
-	if err != nil {
-		return nil, err
-	}
+	desiredAnnotations := getPodsAnnotationSet(template)
 	accessor, err := meta.Accessor(parentObject)
 	if err != nil {
 		return nil, fmt.Errorf("parentObject does not have ObjectMeta, %v", err)
@@ -559,11 +552,7 @@ func GetPodFromTemplate(template *v1.PodTemplateSpec, parentObject runtime.Objec
 	if controllerRef != nil {
 		pod.OwnerReferences = append(pod.OwnerReferences, *controllerRef)
 	}
-	clone, err := scheme.Scheme.DeepCopy(&template.Spec)
-	if err != nil {
-		return nil, err
-	}
-	pod.Spec = *clone.(*v1.PodSpec)
+	pod.Spec = *template.Spec.DeepCopy()
 	return pod, nil
 }
 
@@ -578,7 +567,7 @@ func (r RealPodControl) createPods(nodeName, namespace string, template *v1.PodT
 	if labels.Set(pod.Labels).AsSelectorPreValidated().Empty() {
 		return fmt.Errorf("unable to create pods, no labels")
 	}
-	if newPod, err := r.KubeClient.Core().Pods(namespace).Create(pod); err != nil {
+	if newPod, err := r.KubeClient.CoreV1().Pods(namespace).Create(pod); err != nil {
 		r.Recorder.Eventf(object, v1.EventTypeWarning, FailedCreatePodReason, "Error creating: %v", err)
 		return err
 	} else {
@@ -599,7 +588,7 @@ func (r RealPodControl) DeletePod(namespace string, podID string, object runtime
 		return fmt.Errorf("object does not have ObjectMeta, %v", err)
 	}
 	glog.V(2).Infof("Controller %v deleting pod %v/%v", accessor.GetName(), namespace, podID)
-	if err := r.KubeClient.Core().Pods(namespace).Delete(podID, nil); err != nil {
+	if err := r.KubeClient.CoreV1().Pods(namespace).Delete(podID, nil); err != nil {
 		r.Recorder.Eventf(object, v1.EventTypeWarning, FailedDeletePodReason, "Error deleting: %v", err)
 		return fmt.Errorf("unable to delete pods: %v", err)
 	} else {
@@ -610,11 +599,13 @@ func (r RealPodControl) DeletePod(namespace string, podID string, object runtime
 
 type FakePodControl struct {
 	sync.Mutex
-	Templates      []v1.PodTemplateSpec
-	ControllerRefs []metav1.OwnerReference
-	DeletePodName  []string
-	Patches        [][]byte
-	Err            error
+	Templates       []v1.PodTemplateSpec
+	ControllerRefs  []metav1.OwnerReference
+	DeletePodName   []string
+	Patches         [][]byte
+	Err             error
+	CreateLimit     int
+	CreateCallCount int
 }
 
 var _ PodControlInterface = &FakePodControl{}
@@ -632,6 +623,10 @@ func (f *FakePodControl) PatchPod(namespace, name string, data []byte) error {
 func (f *FakePodControl) CreatePods(namespace string, spec *v1.PodTemplateSpec, object runtime.Object) error {
 	f.Lock()
 	defer f.Unlock()
+	f.CreateCallCount++
+	if f.CreateLimit != 0 && f.CreateCallCount > f.CreateLimit {
+		return fmt.Errorf("Not creating pod, limit %d already reached (create call %d)", f.CreateLimit, f.CreateCallCount)
+	}
 	f.Templates = append(f.Templates, *spec)
 	if f.Err != nil {
 		return f.Err
@@ -642,6 +637,10 @@ func (f *FakePodControl) CreatePods(namespace string, spec *v1.PodTemplateSpec, 
 func (f *FakePodControl) CreatePodsWithControllerRef(namespace string, spec *v1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
 	f.Lock()
 	defer f.Unlock()
+	f.CreateCallCount++
+	if f.CreateLimit != 0 && f.CreateCallCount > f.CreateLimit {
+		return fmt.Errorf("Not creating pod, limit %d already reached (create call %d)", f.CreateLimit, f.CreateCallCount)
+	}
 	f.Templates = append(f.Templates, *spec)
 	f.ControllerRefs = append(f.ControllerRefs, *controllerRef)
 	if f.Err != nil {
@@ -653,6 +652,10 @@ func (f *FakePodControl) CreatePodsWithControllerRef(namespace string, spec *v1.
 func (f *FakePodControl) CreatePodsOnNode(nodeName, namespace string, template *v1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
 	f.Lock()
 	defer f.Unlock()
+	f.CreateCallCount++
+	if f.CreateLimit != 0 && f.CreateCallCount > f.CreateLimit {
+		return fmt.Errorf("Not creating pod, limit %d already reached (create call %d)", f.CreateLimit, f.CreateCallCount)
+	}
 	f.Templates = append(f.Templates, *template)
 	f.ControllerRefs = append(f.ControllerRefs, *controllerRef)
 	if f.Err != nil {
@@ -678,6 +681,8 @@ func (f *FakePodControl) Clear() {
 	f.Templates = []v1.PodTemplateSpec{}
 	f.ControllerRefs = []metav1.OwnerReference{}
 	f.Patches = [][]byte{}
+	f.CreateLimit = 0
+	f.CreateCallCount = 0
 }
 
 // ByLogging allows custom sorting of pods so the best one can be picked for getting its logs.
@@ -898,10 +903,10 @@ func AddOrUpdateTaintOnNode(c clientset.Interface, nodeName string, taints ...*v
 		// First we try getting node from the API server cache, as it's cheaper. If it fails
 		// we get it from etcd to be sure to have fresh data.
 		if firstTry {
-			oldNode, err = c.Core().Nodes().Get(nodeName, metav1.GetOptions{ResourceVersion: "0"})
+			oldNode, err = c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{ResourceVersion: "0"})
 			firstTry = false
 		} else {
-			oldNode, err = c.Core().Nodes().Get(nodeName, metav1.GetOptions{})
+			oldNode, err = c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
 		}
 		if err != nil {
 			return err
@@ -955,10 +960,10 @@ func RemoveTaintOffNode(c clientset.Interface, nodeName string, node *v1.Node, t
 		// First we try getting node from the API server cache, as it's cheaper. If it fails
 		// we get it from etcd to be sure to have fresh data.
 		if firstTry {
-			oldNode, err = c.Core().Nodes().Get(nodeName, metav1.GetOptions{ResourceVersion: "0"})
+			oldNode, err = c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{ResourceVersion: "0"})
 			firstTry = false
 		} else {
-			oldNode, err = c.Core().Nodes().Get(nodeName, metav1.GetOptions{})
+			oldNode, err = c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
 		}
 		if err != nil {
 			return err
@@ -991,18 +996,11 @@ func PatchNodeTaints(c clientset.Interface, nodeName string, oldNode *v1.Node, n
 	}
 
 	newTaints := newNode.Spec.Taints
-	objCopy, err := scheme.Scheme.DeepCopy(oldNode)
+	newNodeClone := oldNode.DeepCopy()
+	newNodeClone.Spec.Taints = newTaints
+	newData, err := json.Marshal(newNodeClone)
 	if err != nil {
-		return fmt.Errorf("failed to copy node object %#v: %v", oldNode, err)
-	}
-	newNode, ok := (objCopy).(*v1.Node)
-	if !ok {
-		return fmt.Errorf("failed to cast copy onto node object %#v: %v", newNode, err)
-	}
-	newNode.Spec.Taints = newTaints
-	newData, err := json.Marshal(newNode)
-	if err != nil {
-		return fmt.Errorf("failed to marshal new node %#v for node %q: %v", newNode, nodeName, err)
+		return fmt.Errorf("failed to marshal new node %#v for node %q: %v", newNodeClone, nodeName, err)
 	}
 
 	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, v1.Node{})
@@ -1010,7 +1008,7 @@ func PatchNodeTaints(c clientset.Interface, nodeName string, oldNode *v1.Node, n
 		return fmt.Errorf("failed to create patch for node %q: %v", nodeName, err)
 	}
 
-	_, err = c.Core().Nodes().Patch(string(nodeName), types.StrategicMergePatchType, patchBytes)
+	_, err = c.CoreV1().Nodes().Patch(nodeName, types.StrategicMergePatchType, patchBytes)
 	return err
 }
 

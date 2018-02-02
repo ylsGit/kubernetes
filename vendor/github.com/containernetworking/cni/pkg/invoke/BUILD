@@ -9,17 +9,30 @@ go_library(
         "find.go",
         "raw_exec.go",
     ] + select({
-        "@io_bazel_rules_go//go/platform:darwin_amd64": [
+        "@io_bazel_rules_go//go/platform:darwin": [
             "os_unix.go",
         ],
-        "@io_bazel_rules_go//go/platform:linux_amd64": [
+        "@io_bazel_rules_go//go/platform:dragonfly": [
             "os_unix.go",
         ],
-        "@io_bazel_rules_go//go/platform:windows_amd64": [
+        "@io_bazel_rules_go//go/platform:freebsd": [
+            "os_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:linux": [
+            "os_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:netbsd": [
+            "os_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:solaris": [
+            "os_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:windows": [
             "os_windows.go",
         ],
         "//conditions:default": [],
     }),
+    importpath = "github.com/containernetworking/cni/pkg/invoke",
     visibility = ["//visibility:public"],
     deps = [
         "//vendor/github.com/containernetworking/cni/pkg/types:go_default_library",

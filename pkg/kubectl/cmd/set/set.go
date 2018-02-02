@@ -32,9 +32,10 @@ var (
 		These commands help you make changes to existing application resources.`)
 )
 
-func NewCmdSet(f cmdutil.Factory, out, err io.Writer) *cobra.Command {
+func NewCmdSet(f cmdutil.Factory, in io.Reader, out, err io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "set SUBCOMMAND",
+		Use: "set SUBCOMMAND",
+		DisableFlagsInUseLine: true,
 		Short: i18n.T("Set specific features on objects"),
 		Long:  set_long,
 		Run:   cmdutil.DefaultSubCommandRun(err),
@@ -46,5 +47,7 @@ func NewCmdSet(f cmdutil.Factory, out, err io.Writer) *cobra.Command {
 	cmd.AddCommand(NewCmdSelector(f, out))
 	cmd.AddCommand(NewCmdSubject(f, out, err))
 	cmd.AddCommand(NewCmdServiceAccount(f, out, err))
+	cmd.AddCommand(NewCmdEnv(f, in, out, err))
+
 	return cmd
 }

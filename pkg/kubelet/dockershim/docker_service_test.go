@@ -50,7 +50,6 @@ func newTestDockerService() (*dockerService, *libdocker.FakeDockerClient, *clock
 		client:            c,
 		os:                &containertest.FakeOS{},
 		network:           pm,
-		legacyCleanup:     legacyCleanupFlag{done: 1},
 		checkpointHandler: NewTestPersistentCheckpointHandler(),
 		networkReady:      make(map[string]bool),
 	}, c, fakeClock
@@ -84,33 +83,33 @@ func TestStatus(t *testing.T) {
 	}
 
 	// Should report ready status if version returns no error.
-	status, err := ds.Status()
-	assert.NoError(t, err)
+	statusResp, err := ds.Status(getTestCTX(), &runtimeapi.StatusRequest{})
+	require.NoError(t, err)
 	assertStatus(map[string]bool{
 		runtimeapi.RuntimeReady: true,
 		runtimeapi.NetworkReady: true,
-	}, status)
+	}, statusResp.Status)
 
 	// Should not report ready status if version returns error.
 	fDocker.InjectError("version", errors.New("test error"))
-	status, err = ds.Status()
+	statusResp, err = ds.Status(getTestCTX(), &runtimeapi.StatusRequest{})
 	assert.NoError(t, err)
 	assertStatus(map[string]bool{
 		runtimeapi.RuntimeReady: false,
 		runtimeapi.NetworkReady: true,
-	}, status)
+	}, statusResp.Status)
 
 	// Should not report ready status is network plugin returns error.
 	mockPlugin := newTestNetworkPlugin(t)
 	ds.network = network.NewPluginManager(mockPlugin)
 	defer mockPlugin.Finish()
 	mockPlugin.EXPECT().Status().Return(errors.New("network error"))
-	status, err = ds.Status()
+	statusResp, err = ds.Status(getTestCTX(), &runtimeapi.StatusRequest{})
 	assert.NoError(t, err)
 	assertStatus(map[string]bool{
 		runtimeapi.RuntimeReady: true,
 		runtimeapi.NetworkReady: false,
-	}, status)
+	}, statusResp.Status)
 }
 
 func TestVersion(t *testing.T) {

@@ -35,6 +35,7 @@ import (
 	"github.com/docker/docker/pkg/mount"
 	"github.com/golang/glog"
 	"github.com/google/cadvisor/devicemapper"
+	"github.com/google/cadvisor/utils"
 	dockerutil "github.com/google/cadvisor/utils/docker"
 	zfs "github.com/mistifyio/go-zfs"
 )
@@ -43,6 +44,7 @@ const (
 	LabelSystemRoot   = "root"
 	LabelDockerImages = "docker-images"
 	LabelRktImages    = "rkt-images"
+	LabelCrioImages   = "crio-images"
 )
 
 // The maximum number of `du` and `find` tasks that can be running at once.
@@ -83,12 +85,15 @@ type RealFsInfo struct {
 	mounts map[string]*mount.Info
 	// devicemapper client
 	dmsetup devicemapper.DmsetupClient
+	// fsUUIDToDeviceName is a map from the filesystem UUID to its device name.
+	fsUUIDToDeviceName map[string]string
 }
 
 type Context struct {
 	// docker root directory.
 	Docker  DockerContext
 	RktPath string
+	Crio    CrioContext
 }
 
 type DockerContext struct {
@@ -97,8 +102,17 @@ type DockerContext struct {
 	DriverStatus map[string]string
 }
 
+type CrioContext struct {
+	Root string
+}
+
 func NewFsInfo(context Context) (FsInfo, error) {
 	mounts, err := mount.GetMounts()
+	if err != nil {
+		return nil, err
+	}
+
+	fsUUIDToDeviceName, err := getFsUUIDToDeviceNameMap()
 	if err != nil {
 		return nil, err
 	}
@@ -106,10 +120,11 @@ func NewFsInfo(context Context) (FsInfo, error) {
 	// Avoid devicemapper container mounts - these are tracked by the ThinPoolWatcher
 	excluded := []string{fmt.Sprintf("%s/devicemapper/mnt", context.Docker.Root)}
 	fsInfo := &RealFsInfo{
-		partitions: processMounts(mounts, excluded),
-		labels:     make(map[string]string, 0),
-		mounts:     make(map[string]*mount.Info, 0),
-		dmsetup:    devicemapper.NewDmsetupClient(),
+		partitions:         processMounts(mounts, excluded),
+		labels:             make(map[string]string, 0),
+		mounts:             make(map[string]*mount.Info, 0),
+		dmsetup:            devicemapper.NewDmsetupClient(),
+		fsUUIDToDeviceName: fsUUIDToDeviceName,
 	}
 
 	for _, mount := range mounts {
@@ -120,10 +135,44 @@ func NewFsInfo(context Context) (FsInfo, error) {
 	// need to call this before the log line below printing out the partitions, as this function may
 	// add a "partition" for devicemapper to fsInfo.partitions
 	fsInfo.addDockerImagesLabel(context, mounts)
+	fsInfo.addCrioImagesLabel(context, mounts)
 
-	glog.Infof("Filesystem partitions: %+v", fsInfo.partitions)
+	glog.V(1).Infof("Filesystem UUIDs: %+v", fsInfo.fsUUIDToDeviceName)
+	glog.V(1).Infof("Filesystem partitions: %+v", fsInfo.partitions)
 	fsInfo.addSystemRootLabel(mounts)
 	return fsInfo, nil
+}
+
+// getFsUUIDToDeviceNameMap creates the filesystem uuid to device name map
+// using the information in /dev/disk/by-uuid. If the directory does not exist,
+// this function will return an empty map.
+func getFsUUIDToDeviceNameMap() (map[string]string, error) {
+	const dir = "/dev/disk/by-uuid"
+
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return make(map[string]string), nil
+	}
+
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	fsUUIDToDeviceName := make(map[string]string)
+	for _, file := range files {
+		path := filepath.Join(dir, file.Name())
+		target, err := os.Readlink(path)
+		if err != nil {
+			glog.Warningf("Failed to resolve symlink for %q", path)
+			continue
+		}
+		device, err := filepath.Abs(filepath.Join(dir, target))
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve the absolute path of %q", filepath.Join(dir, target))
+		}
+		fsUUIDToDeviceName[file.Name()] = device
+	}
+	return fsUUIDToDeviceName, nil
 }
 
 func processMounts(mounts []*mount.Info, excludedMountpointPrefixes []string) map[string]partition {
@@ -237,6 +286,23 @@ func (self *RealFsInfo) addDockerImagesLabel(context Context, mounts []*mount.In
 	}
 }
 
+func (self *RealFsInfo) addCrioImagesLabel(context Context, mounts []*mount.Info) {
+	if context.Crio.Root != "" {
+		crioPath := context.Crio.Root
+		crioImagePaths := map[string]struct{}{
+			"/": {},
+		}
+		for _, dir := range []string{"overlay", "overlay2"} {
+			crioImagePaths[path.Join(crioPath, dir+"-images")] = struct{}{}
+		}
+		for crioPath != "/" && crioPath != "." {
+			crioImagePaths[crioPath] = struct{}{}
+			crioPath = filepath.Dir(crioPath)
+		}
+		self.updateContainerImagesPath(LabelCrioImages, mounts, crioImagePaths)
+	}
+}
+
 func (self *RealFsInfo) addRktImagesLabel(context Context, mounts []*mount.Info) {
 	if context.RktPath != "" {
 		rktPath := context.RktPath
@@ -344,10 +410,14 @@ func (self *RealFsInfo) GetFsInfoForPath(mountSet map[string]struct{}) ([]Fs, er
 				fs.Type = ZFS
 			default:
 				var inodes, inodesFree uint64
-				fs.Capacity, fs.Free, fs.Available, inodes, inodesFree, err = getVfsStats(partition.mountpoint)
-				fs.Inodes = &inodes
-				fs.InodesFree = &inodesFree
-				fs.Type = VFS
+				if utils.FileExists(partition.mountpoint) {
+					fs.Capacity, fs.Free, fs.Available, inodes, inodesFree, err = getVfsStats(partition.mountpoint)
+					fs.Inodes = &inodes
+					fs.InodesFree = &inodesFree
+					fs.Type = VFS
+				} else {
+					glog.V(4).Infof("unable to determine file system type, partition mountpoint does not exist: %v", partition.mountpoint)
+				}
 			}
 			if err != nil {
 				glog.Errorf("Stat fs failed. Error: %v", err)
@@ -373,7 +443,7 @@ func getDiskStatsMap(diskStatsFile string) (map[string]DiskStats, error) {
 	file, err := os.Open(diskStatsFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			glog.Infof("not collecting filesystem statistics because file %q was not available", diskStatsFile)
+			glog.Warningf("Not collecting filesystem statistics because file %q was not found", diskStatsFile)
 			return diskStatsMap, nil
 		}
 		return nil, err
@@ -433,6 +503,18 @@ func minor(devNumber uint64) uint {
 	return uint((devNumber & 0xff) | ((devNumber >> 12) & 0xfff00))
 }
 
+func (self *RealFsInfo) GetDeviceInfoByFsUUID(uuid string) (*DeviceInfo, error) {
+	deviceName, found := self.fsUUIDToDeviceName[uuid]
+	if !found {
+		return nil, ErrNoSuchDevice
+	}
+	p, found := self.partitions[deviceName]
+	if !found {
+		return nil, fmt.Errorf("cannot find device %q in partitions", deviceName)
+	}
+	return &DeviceInfo{deviceName, p.major, p.minor}, nil
+}
+
 func (self *RealFsInfo) GetDirFsDevice(dir string) (*DeviceInfo, error) {
 	buf := new(syscall.Stat_t)
 	err := syscall.Stat(dir, buf)
@@ -484,12 +566,12 @@ func GetDirDiskUsage(dir string, timeout time.Duration) (uint64, error) {
 		return 0, fmt.Errorf("failed to exec du - %v", err)
 	}
 	timer := time.AfterFunc(timeout, func() {
-		glog.Infof("killing cmd %v due to timeout(%s)", cmd.Args, timeout.String())
+		glog.Warningf("Killing cmd %v due to timeout(%s)", cmd.Args, timeout.String())
 		cmd.Process.Kill()
 	})
 	stdoutb, souterr := ioutil.ReadAll(stdoutp)
 	if souterr != nil {
-		glog.Errorf("failed to read from stdout for cmd %v - %v", cmd.Args, souterr)
+		glog.Errorf("Failed to read from stdout for cmd %v - %v", cmd.Args, souterr)
 	}
 	stderrb, _ := ioutil.ReadAll(stderrp)
 	err = cmd.Wait()
@@ -523,13 +605,14 @@ func GetDirInodeUsage(dir string, timeout time.Duration) (uint64, error) {
 		return 0, fmt.Errorf("failed to exec cmd %v - %v; stderr: %v", findCmd.Args, err, stderr.String())
 	}
 	timer := time.AfterFunc(timeout, func() {
-		glog.Infof("killing cmd %v due to timeout(%s)", findCmd.Args, timeout.String())
+		glog.Warningf("Killing cmd %v due to timeout(%s)", findCmd.Args, timeout.String())
 		findCmd.Process.Kill()
 	})
-	if err := findCmd.Wait(); err != nil {
+	err := findCmd.Wait()
+	timer.Stop()
+	if err != nil {
 		return 0, fmt.Errorf("cmd %v failed. stderr: %s; err: %v", findCmd.Args, stderr.String(), err)
 	}
-	timer.Stop()
 	return counter.bytesWritten, nil
 }
 
@@ -663,7 +746,7 @@ func getBtrfsMajorMinorIds(mount *mount.Info) (int, int, error) {
 		return 0, 0, err
 	}
 
-	glog.Infof("btrfs mount %#v", mount)
+	glog.V(4).Infof("btrfs mount %#v", mount)
 	if buf.Mode&syscall.S_IFMT == syscall.S_IFBLK {
 		err := syscall.Stat(mount.Mountpoint, buf)
 		if err != nil {
@@ -671,8 +754,8 @@ func getBtrfsMajorMinorIds(mount *mount.Info) (int, int, error) {
 			return 0, 0, err
 		}
 
-		glog.Infof("btrfs dev major:minor %d:%d\n", int(major(buf.Dev)), int(minor(buf.Dev)))
-		glog.Infof("btrfs rdev major:minor %d:%d\n", int(major(buf.Rdev)), int(minor(buf.Rdev)))
+		glog.V(4).Infof("btrfs dev major:minor %d:%d\n", int(major(buf.Dev)), int(minor(buf.Dev)))
+		glog.V(4).Infof("btrfs rdev major:minor %d:%d\n", int(major(buf.Rdev)), int(minor(buf.Rdev)))
 
 		return int(major(buf.Dev)), int(minor(buf.Dev)), nil
 	} else {

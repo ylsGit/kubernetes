@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,10 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	admissionregistrationv1alpha1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1alpha1"
 	fakeadmissionregistrationv1alpha1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1alpha1/fake"
+	admissionregistrationv1beta1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1beta1"
+	fakeadmissionregistrationv1beta1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1beta1/fake"
+	appsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
+	fakeappsv1 "k8s.io/client-go/kubernetes/typed/apps/v1/fake"
 	appsv1beta1 "k8s.io/client-go/kubernetes/typed/apps/v1beta1"
 	fakeappsv1beta1 "k8s.io/client-go/kubernetes/typed/apps/v1beta1/fake"
 	appsv1beta2 "k8s.io/client-go/kubernetes/typed/apps/v1beta2"
@@ -38,8 +42,8 @@ import (
 	fakeauthorizationv1beta1 "k8s.io/client-go/kubernetes/typed/authorization/v1beta1/fake"
 	autoscalingv1 "k8s.io/client-go/kubernetes/typed/autoscaling/v1"
 	fakeautoscalingv1 "k8s.io/client-go/kubernetes/typed/autoscaling/v1/fake"
-	autoscalingv2alpha1 "k8s.io/client-go/kubernetes/typed/autoscaling/v2alpha1"
-	fakeautoscalingv2alpha1 "k8s.io/client-go/kubernetes/typed/autoscaling/v2alpha1/fake"
+	autoscalingv2beta1 "k8s.io/client-go/kubernetes/typed/autoscaling/v2beta1"
+	fakeautoscalingv2beta1 "k8s.io/client-go/kubernetes/typed/autoscaling/v2beta1/fake"
 	batchv1 "k8s.io/client-go/kubernetes/typed/batch/v1"
 	fakebatchv1 "k8s.io/client-go/kubernetes/typed/batch/v1/fake"
 	batchv1beta1 "k8s.io/client-go/kubernetes/typed/batch/v1beta1"
@@ -50,6 +54,8 @@ import (
 	fakecertificatesv1beta1 "k8s.io/client-go/kubernetes/typed/certificates/v1beta1/fake"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	fakecorev1 "k8s.io/client-go/kubernetes/typed/core/v1/fake"
+	eventsv1beta1 "k8s.io/client-go/kubernetes/typed/events/v1beta1"
+	fakeeventsv1beta1 "k8s.io/client-go/kubernetes/typed/events/v1beta1/fake"
 	extensionsv1beta1 "k8s.io/client-go/kubernetes/typed/extensions/v1beta1"
 	fakeextensionsv1beta1 "k8s.io/client-go/kubernetes/typed/extensions/v1beta1/fake"
 	networkingv1 "k8s.io/client-go/kubernetes/typed/networking/v1"
@@ -68,6 +74,8 @@ import (
 	fakesettingsv1alpha1 "k8s.io/client-go/kubernetes/typed/settings/v1alpha1/fake"
 	storagev1 "k8s.io/client-go/kubernetes/typed/storage/v1"
 	fakestoragev1 "k8s.io/client-go/kubernetes/typed/storage/v1/fake"
+	storagev1alpha1 "k8s.io/client-go/kubernetes/typed/storage/v1alpha1"
+	fakestoragev1alpha1 "k8s.io/client-go/kubernetes/typed/storage/v1alpha1/fake"
 	storagev1beta1 "k8s.io/client-go/kubernetes/typed/storage/v1beta1"
 	fakestoragev1beta1 "k8s.io/client-go/kubernetes/typed/storage/v1beta1/fake"
 	"k8s.io/client-go/testing"
@@ -87,10 +95,17 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 
 	fakePtr := testing.Fake{}
 	fakePtr.AddReactor("*", "*", testing.ObjectReaction(o))
+	fakePtr.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
+		gvr := action.GetResource()
+		ns := action.GetNamespace()
+		watch, err := o.Watch(gvr, ns)
+		if err != nil {
+			return false, nil, err
+		}
+		return true, watch, nil
+	})
 
-	fakePtr.AddWatchReactor("*", testing.DefaultWatchReactor(watch.NewFake(), nil))
-
-	return &Clientset{fakePtr}
+	return &Clientset{fakePtr, &fakediscovery.FakeDiscovery{Fake: &fakePtr}}
 }
 
 // Clientset implements clientset.Interface. Meant to be embedded into a
@@ -98,10 +113,11 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 // you want to test easier.
 type Clientset struct {
 	testing.Fake
+	discovery *fakediscovery.FakeDiscovery
 }
 
 func (c *Clientset) Discovery() discovery.DiscoveryInterface {
-	return &fakediscovery.FakeDiscovery{Fake: &c.Fake}
+	return c.discovery
 }
 
 var _ clientset.Interface = &Clientset{}
@@ -111,9 +127,14 @@ func (c *Clientset) AdmissionregistrationV1alpha1() admissionregistrationv1alpha
 	return &fakeadmissionregistrationv1alpha1.FakeAdmissionregistrationV1alpha1{Fake: &c.Fake}
 }
 
-// Admissionregistration retrieves the AdmissionregistrationV1alpha1Client
-func (c *Clientset) Admissionregistration() admissionregistrationv1alpha1.AdmissionregistrationV1alpha1Interface {
-	return &fakeadmissionregistrationv1alpha1.FakeAdmissionregistrationV1alpha1{Fake: &c.Fake}
+// AdmissionregistrationV1beta1 retrieves the AdmissionregistrationV1beta1Client
+func (c *Clientset) AdmissionregistrationV1beta1() admissionregistrationv1beta1.AdmissionregistrationV1beta1Interface {
+	return &fakeadmissionregistrationv1beta1.FakeAdmissionregistrationV1beta1{Fake: &c.Fake}
+}
+
+// Admissionregistration retrieves the AdmissionregistrationV1beta1Client
+func (c *Clientset) Admissionregistration() admissionregistrationv1beta1.AdmissionregistrationV1beta1Interface {
+	return &fakeadmissionregistrationv1beta1.FakeAdmissionregistrationV1beta1{Fake: &c.Fake}
 }
 
 // AppsV1beta1 retrieves the AppsV1beta1Client
@@ -126,9 +147,14 @@ func (c *Clientset) AppsV1beta2() appsv1beta2.AppsV1beta2Interface {
 	return &fakeappsv1beta2.FakeAppsV1beta2{Fake: &c.Fake}
 }
 
-// Apps retrieves the AppsV1beta2Client
-func (c *Clientset) Apps() appsv1beta2.AppsV1beta2Interface {
-	return &fakeappsv1beta2.FakeAppsV1beta2{Fake: &c.Fake}
+// AppsV1 retrieves the AppsV1Client
+func (c *Clientset) AppsV1() appsv1.AppsV1Interface {
+	return &fakeappsv1.FakeAppsV1{Fake: &c.Fake}
+}
+
+// Apps retrieves the AppsV1Client
+func (c *Clientset) Apps() appsv1.AppsV1Interface {
+	return &fakeappsv1.FakeAppsV1{Fake: &c.Fake}
 }
 
 // AuthenticationV1 retrieves the AuthenticationV1Client
@@ -171,9 +197,9 @@ func (c *Clientset) Autoscaling() autoscalingv1.AutoscalingV1Interface {
 	return &fakeautoscalingv1.FakeAutoscalingV1{Fake: &c.Fake}
 }
 
-// AutoscalingV2alpha1 retrieves the AutoscalingV2alpha1Client
-func (c *Clientset) AutoscalingV2alpha1() autoscalingv2alpha1.AutoscalingV2alpha1Interface {
-	return &fakeautoscalingv2alpha1.FakeAutoscalingV2alpha1{Fake: &c.Fake}
+// AutoscalingV2beta1 retrieves the AutoscalingV2beta1Client
+func (c *Clientset) AutoscalingV2beta1() autoscalingv2beta1.AutoscalingV2beta1Interface {
+	return &fakeautoscalingv2beta1.FakeAutoscalingV2beta1{Fake: &c.Fake}
 }
 
 // BatchV1 retrieves the BatchV1Client
@@ -214,6 +240,16 @@ func (c *Clientset) CoreV1() corev1.CoreV1Interface {
 // Core retrieves the CoreV1Client
 func (c *Clientset) Core() corev1.CoreV1Interface {
 	return &fakecorev1.FakeCoreV1{Fake: &c.Fake}
+}
+
+// EventsV1beta1 retrieves the EventsV1beta1Client
+func (c *Clientset) EventsV1beta1() eventsv1beta1.EventsV1beta1Interface {
+	return &fakeeventsv1beta1.FakeEventsV1beta1{Fake: &c.Fake}
+}
+
+// Events retrieves the EventsV1beta1Client
+func (c *Clientset) Events() eventsv1beta1.EventsV1beta1Interface {
+	return &fakeeventsv1beta1.FakeEventsV1beta1{Fake: &c.Fake}
 }
 
 // ExtensionsV1beta1 retrieves the ExtensionsV1beta1Client
@@ -299,4 +335,9 @@ func (c *Clientset) StorageV1() storagev1.StorageV1Interface {
 // Storage retrieves the StorageV1Client
 func (c *Clientset) Storage() storagev1.StorageV1Interface {
 	return &fakestoragev1.FakeStorageV1{Fake: &c.Fake}
+}
+
+// StorageV1alpha1 retrieves the StorageV1alpha1Client
+func (c *Clientset) StorageV1alpha1() storagev1alpha1.StorageV1alpha1Interface {
+	return &fakestoragev1alpha1.FakeStorageV1alpha1{Fake: &c.Fake}
 }

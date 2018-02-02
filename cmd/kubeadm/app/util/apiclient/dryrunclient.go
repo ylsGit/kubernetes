@@ -23,11 +23,12 @@ import (
 	"io"
 	"strings"
 
-	"github.com/ghodss/yaml"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientset "k8s.io/client-go/kubernetes"
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
+	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 )
 
 // DryRunGetter is an interface that must be supplied to the NewDryRunClient function in order to contstruct a fully functional fake dryrun clientset
@@ -37,12 +38,11 @@ type DryRunGetter interface {
 }
 
 // MarshalFunc takes care of converting any object to a byte array for displaying the object to the user
-type MarshalFunc func(runtime.Object) ([]byte, error)
+type MarshalFunc func(runtime.Object, schema.GroupVersion) ([]byte, error)
 
 // DefaultMarshalFunc is the default MarshalFunc used; uses YAML to print objects to the user
-func DefaultMarshalFunc(obj runtime.Object) ([]byte, error) {
-	b, err := yaml.Marshal(obj)
-	return b, err
+func DefaultMarshalFunc(obj runtime.Object, gv schema.GroupVersion) ([]byte, error) {
+	return kubeadmutil.MarshalToYaml(obj, gv)
 }
 
 // DryRunClientOptions specifies options to pass to NewDryRunClientWithOpts in order to get a dryrun clientset
@@ -85,10 +85,10 @@ func NewDryRunClient(drg DryRunGetter, w io.Writer) clientset.Interface {
 // This client doesn't apply changes to the backend. The client gets GET/LIST values from the DryRunGetter implementation.
 // This client logs all I/O to the writer w in YAML format
 func NewDryRunClientWithOpts(opts DryRunClientOptions) clientset.Interface {
-	// Build a chain of reactors to act like a normal clientset; but log everything's that happening and don't change any state
+	// Build a chain of reactors to act like a normal clientset; but log everything that is happening and don't change any state
 	client := fakeclientset.NewSimpleClientset()
 
-	// Build the chain of reactors. Order matters; first item here will be invoked first on match, then the second one will be evaluted, etc.
+	// Build the chain of reactors. Order matters; first item here will be invoked first on match, then the second one will be evaluated, etc.
 	defaultReactorChain := []core.Reactor{
 		// Log everything that happens. Default the object if it's about to be created/updated so that the logged object is representative.
 		&core.SimpleReactor{
@@ -115,10 +115,10 @@ func NewDryRunClientWithOpts(opts DryRunClientOptions) clientset.Interface {
 
 				if opts.PrintGETAndLIST {
 					// Print the marshalled object format with one tab indentation
-					objBytes, err := opts.MarshalFunc(obj)
+					objBytes, err := opts.MarshalFunc(obj, action.GetResource().GroupVersion())
 					if err == nil {
 						fmt.Println("[dryrun] Returning faked GET response:")
-						printBytesWithLinePrefix(opts.Writer, objBytes, "\t")
+						PrintBytesWithLinePrefix(opts.Writer, objBytes, "\t")
 					}
 				}
 
@@ -140,10 +140,10 @@ func NewDryRunClientWithOpts(opts DryRunClientOptions) clientset.Interface {
 
 				if opts.PrintGETAndLIST {
 					// Print the marshalled object format with one tab indentation
-					objBytes, err := opts.MarshalFunc(objs)
+					objBytes, err := opts.MarshalFunc(objs, action.GetResource().GroupVersion())
 					if err == nil {
 						fmt.Println("[dryrun] Returning faked LIST response:")
-						printBytesWithLinePrefix(opts.Writer, objBytes, "\t")
+						PrintBytesWithLinePrefix(opts.Writer, objBytes, "\t")
 					}
 				}
 
@@ -214,22 +214,22 @@ func logDryRunAction(action core.Action, w io.Writer, marshalFunc MarshalFunc) {
 	objAction, ok := action.(actionWithObject)
 	if ok && objAction.GetObject() != nil {
 		// Print the marshalled object with a tab indentation
-		objBytes, err := marshalFunc(objAction.GetObject())
+		objBytes, err := marshalFunc(objAction.GetObject(), action.GetResource().GroupVersion())
 		if err == nil {
 			fmt.Println("[dryrun] Attached object:")
-			printBytesWithLinePrefix(w, objBytes, "\t")
+			PrintBytesWithLinePrefix(w, objBytes, "\t")
 		}
 	}
 
 	patchAction, ok := action.(core.PatchAction)
 	if ok {
-		// Replace all occurences of \" with a simple " when printing
+		// Replace all occurrences of \" with a simple " when printing
 		fmt.Fprintf(w, "[dryrun] Attached patch:\n\t%s\n", strings.Replace(string(patchAction.GetPatch()), `\"`, `"`, -1))
 	}
 }
 
-// printBytesWithLinePrefix prints objBytes to writer w with linePrefix in the beginning of every line
-func printBytesWithLinePrefix(w io.Writer, objBytes []byte, linePrefix string) {
+// PrintBytesWithLinePrefix prints objBytes to writer w with linePrefix in the beginning of every line
+func PrintBytesWithLinePrefix(w io.Writer, objBytes []byte, linePrefix string) {
 	scanner := bufio.NewScanner(bytes.NewReader(objBytes))
 	for scanner.Scan() {
 		fmt.Fprintf(w, "%s%s\n", linePrefix, scanner.Text())

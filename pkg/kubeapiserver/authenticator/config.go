@@ -56,7 +56,9 @@ type AuthenticatorConfig struct {
 	OIDCClientID                string
 	OIDCCAFile                  string
 	OIDCUsernameClaim           string
+	OIDCUsernamePrefix          string
 	OIDCGroupsClaim             string
+	OIDCGroupsPrefix            string
 	ServiceAccountKeyFiles      []string
 	ServiceAccountLookup        bool
 	KeystoneURL                 string
@@ -152,7 +154,7 @@ func (config AuthenticatorConfig) New() (authenticator.Request, *spec.SecurityDe
 	// simply returns an error, the OpenID Connect plugin may query the provider to
 	// update the keys, causing performance hits.
 	if len(config.OIDCIssuerURL) > 0 && len(config.OIDCClientID) > 0 {
-		oidcAuth, err := newAuthenticatorFromOIDCIssuerURL(config.OIDCIssuerURL, config.OIDCClientID, config.OIDCCAFile, config.OIDCUsernameClaim, config.OIDCGroupsClaim)
+		oidcAuth, err := newAuthenticatorFromOIDCIssuerURL(config.OIDCIssuerURL, config.OIDCClientID, config.OIDCCAFile, config.OIDCUsernameClaim, config.OIDCUsernamePrefix, config.OIDCGroupsClaim, config.OIDCGroupsPrefix)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -233,7 +235,7 @@ func newAuthenticatorFromBasicAuthFile(basicAuthFile string) (authenticator.Requ
 	return basicauth.New(basicAuthenticator), nil
 }
 
-// newAuthenticatorFromTokenFile returns an authenticator.Request or an error
+// newAuthenticatorFromTokenFile returns an authenticator.Token or an error
 func newAuthenticatorFromTokenFile(tokenAuthFile string) (authenticator.Token, error) {
 	tokenAuthenticator, err := tokenfile.NewCSV(tokenAuthFile)
 	if err != nil {
@@ -243,14 +245,31 @@ func newAuthenticatorFromTokenFile(tokenAuthFile string) (authenticator.Token, e
 	return tokenAuthenticator, nil
 }
 
-// newAuthenticatorFromOIDCIssuerURL returns an authenticator.Request or an error.
-func newAuthenticatorFromOIDCIssuerURL(issuerURL, clientID, caFile, usernameClaim, groupsClaim string) (authenticator.Token, error) {
+// newAuthenticatorFromOIDCIssuerURL returns an authenticator.Token or an error.
+func newAuthenticatorFromOIDCIssuerURL(issuerURL, clientID, caFile, usernameClaim, usernamePrefix, groupsClaim, groupsPrefix string) (authenticator.Token, error) {
+	const noUsernamePrefix = "-"
+
+	if usernamePrefix == "" && usernameClaim != "email" {
+		// Old behavior. If a usernamePrefix isn't provided, prefix all claims other than "email"
+		// with the issuerURL.
+		//
+		// See https://github.com/kubernetes/kubernetes/issues/31380
+		usernamePrefix = issuerURL + "#"
+	}
+
+	if usernamePrefix == noUsernamePrefix {
+		// Special value indicating usernames shouldn't be prefixed.
+		usernamePrefix = ""
+	}
+
 	tokenAuthenticator, err := oidc.New(oidc.OIDCOptions{
-		IssuerURL:     issuerURL,
-		ClientID:      clientID,
-		CAFile:        caFile,
-		UsernameClaim: usernameClaim,
-		GroupsClaim:   groupsClaim,
+		IssuerURL:      issuerURL,
+		ClientID:       clientID,
+		CAFile:         caFile,
+		UsernameClaim:  usernameClaim,
+		UsernamePrefix: usernamePrefix,
+		GroupsClaim:    groupsClaim,
+		GroupsPrefix:   groupsPrefix,
 	})
 	if err != nil {
 		return nil, err
@@ -259,7 +278,7 @@ func newAuthenticatorFromOIDCIssuerURL(issuerURL, clientID, caFile, usernameClai
 	return tokenAuthenticator, nil
 }
 
-// newServiceAccountAuthenticator returns an authenticator.Request or an error
+// newServiceAccountAuthenticator returns an authenticator.Token or an error
 func newServiceAccountAuthenticator(keyfiles []string, lookup bool, serviceAccountGetter serviceaccount.ServiceAccountTokenGetter) (authenticator.Token, error) {
 	allPublicKeys := []interface{}{}
 	for _, keyfile := range keyfiles {
@@ -270,7 +289,7 @@ func newServiceAccountAuthenticator(keyfiles []string, lookup bool, serviceAccou
 		allPublicKeys = append(allPublicKeys, publicKeys...)
 	}
 
-	tokenAuthenticator := serviceaccount.JWTTokenAuthenticator(allPublicKeys, lookup, serviceAccountGetter)
+	tokenAuthenticator := serviceaccount.JWTTokenAuthenticator(serviceaccount.LegacyIssuer, allPublicKeys, lookup, serviceAccountGetter)
 	return tokenAuthenticator, nil
 }
 

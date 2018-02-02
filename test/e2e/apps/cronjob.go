@@ -24,13 +24,13 @@ import (
 	. "github.com/onsi/gomega"
 
 	batchv1 "k8s.io/api/batch/v1"
-	batchv2alpha1 "k8s.io/api/batch/v2alpha1"
+	batchv1beta1 "k8s.io/api/batch/v1beta1"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	batchinternal "k8s.io/kubernetes/pkg/apis/batch"
 	"k8s.io/kubernetes/pkg/controller/job"
 	"k8s.io/kubernetes/pkg/kubectl"
@@ -51,13 +51,13 @@ var _ = SIGDescribe("CronJob", func() {
 	successCommand := []string{"/bin/true"}
 
 	BeforeEach(func() {
-		framework.SkipIfMissingResource(f.ClientPool, CronJobGroupVersionResource, f.Namespace.Name)
+		framework.SkipIfMissingResource(f.ClientPool, CronJobGroupVersionResourceBeta, f.Namespace.Name)
 	})
 
 	// multiple jobs running at once
 	It("should schedule multiple jobs concurrently", func() {
 		By("Creating a cronjob")
-		cronJob := newTestCronJob("concurrent", "*/1 * * * ?", batchv2alpha1.AllowConcurrent,
+		cronJob := newTestCronJob("concurrent", "*/1 * * * ?", batchv1beta1.AllowConcurrent,
 			sleepCommand, nil)
 		cronJob, err := createCronJob(f.ClientSet, f.Namespace.Name, cronJob)
 		Expect(err).NotTo(HaveOccurred())
@@ -67,7 +67,7 @@ var _ = SIGDescribe("CronJob", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Ensuring at least two running jobs exists by listing jobs explicitly")
-		jobs, err := f.ClientSet.Batch().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
+		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		activeJobs, _ := filterActiveJobs(jobs)
 		Expect(len(activeJobs) >= 2).To(BeTrue())
@@ -80,7 +80,7 @@ var _ = SIGDescribe("CronJob", func() {
 	// suspended should not schedule jobs
 	It("should not schedule jobs when suspended [Slow]", func() {
 		By("Creating a suspended cronjob")
-		cronJob := newTestCronJob("suspended", "*/1 * * * ?", batchv2alpha1.AllowConcurrent,
+		cronJob := newTestCronJob("suspended", "*/1 * * * ?", batchv1beta1.AllowConcurrent,
 			sleepCommand, nil)
 		t := true
 		cronJob.Spec.Suspend = &t
@@ -92,7 +92,7 @@ var _ = SIGDescribe("CronJob", func() {
 		Expect(err).To(HaveOccurred())
 
 		By("Ensuring no job exists by listing jobs explicitly")
-		jobs, err := f.ClientSet.Batch().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
+		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(jobs.Items).To(HaveLen(0))
 
@@ -104,7 +104,7 @@ var _ = SIGDescribe("CronJob", func() {
 	// only single active job is allowed for ForbidConcurrent
 	It("should not schedule new jobs when ForbidConcurrent [Slow]", func() {
 		By("Creating a ForbidConcurrent cronjob")
-		cronJob := newTestCronJob("forbid", "*/1 * * * ?", batchv2alpha1.ForbidConcurrent,
+		cronJob := newTestCronJob("forbid", "*/1 * * * ?", batchv1beta1.ForbidConcurrent,
 			sleepCommand, nil)
 		cronJob, err := createCronJob(f.ClientSet, f.Namespace.Name, cronJob)
 		Expect(err).NotTo(HaveOccurred())
@@ -119,7 +119,7 @@ var _ = SIGDescribe("CronJob", func() {
 		Expect(cronJob.Status.Active).Should(HaveLen(1))
 
 		By("Ensuring exactly one running job exists by listing jobs explicitly")
-		jobs, err := f.ClientSet.Batch().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
+		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		activeJobs, _ := filterActiveJobs(jobs)
 		Expect(activeJobs).To(HaveLen(1))
@@ -136,7 +136,7 @@ var _ = SIGDescribe("CronJob", func() {
 	// only single active job is allowed for ReplaceConcurrent
 	It("should replace jobs when ReplaceConcurrent", func() {
 		By("Creating a ReplaceConcurrent cronjob")
-		cronJob := newTestCronJob("replace", "*/1 * * * ?", batchv2alpha1.ReplaceConcurrent,
+		cronJob := newTestCronJob("replace", "*/1 * * * ?", batchv1beta1.ReplaceConcurrent,
 			sleepCommand, nil)
 		cronJob, err := createCronJob(f.ClientSet, f.Namespace.Name, cronJob)
 		Expect(err).NotTo(HaveOccurred())
@@ -151,7 +151,7 @@ var _ = SIGDescribe("CronJob", func() {
 		Expect(cronJob.Status.Active).Should(HaveLen(1))
 
 		By("Ensuring exactly one running job exists by listing jobs explicitly")
-		jobs, err := f.ClientSet.Batch().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
+		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		activeJobs, _ := filterActiveJobs(jobs)
 		Expect(activeJobs).To(HaveLen(1))
@@ -168,7 +168,7 @@ var _ = SIGDescribe("CronJob", func() {
 	// shouldn't give us unexpected warnings
 	It("should not emit unexpected warnings", func() {
 		By("Creating a cronjob")
-		cronJob := newTestCronJob("concurrent", "*/1 * * * ?", batchv2alpha1.AllowConcurrent,
+		cronJob := newTestCronJob("concurrent", "*/1 * * * ?", batchv1beta1.AllowConcurrent,
 			nil, nil)
 		cronJob, err := createCronJob(f.ClientSet, f.Namespace.Name, cronJob)
 		Expect(err).NotTo(HaveOccurred())
@@ -191,7 +191,7 @@ var _ = SIGDescribe("CronJob", func() {
 	// deleted jobs should be removed from the active list
 	It("should remove from active list jobs that have been deleted", func() {
 		By("Creating a ForbidConcurrent cronjob")
-		cronJob := newTestCronJob("forbid", "*/1 * * * ?", batchv2alpha1.ForbidConcurrent,
+		cronJob := newTestCronJob("forbid", "*/1 * * * ?", batchv1beta1.ForbidConcurrent,
 			sleepCommand, nil)
 		cronJob, err := createCronJob(f.ClientSet, f.Namespace.Name, cronJob)
 		Expect(err).NotTo(HaveOccurred())
@@ -235,7 +235,7 @@ var _ = SIGDescribe("CronJob", func() {
 	It("should delete successful finished jobs with limit of one successful job", func() {
 		By("Creating a AllowConcurrent cronjob with custom history limits")
 		successLimit := int32(1)
-		cronJob := newTestCronJob("concurrent-limit", "*/1 * * * ?", batchv2alpha1.AllowConcurrent,
+		cronJob := newTestCronJob("concurrent-limit", "*/1 * * * ?", batchv1beta1.AllowConcurrent,
 			successCommand, &successLimit)
 		cronJob, err := createCronJob(f.ClientSet, f.Namespace.Name, cronJob)
 		Expect(err).NotTo(HaveOccurred())
@@ -248,7 +248,7 @@ var _ = SIGDescribe("CronJob", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Ensuring a finished job exists by listing jobs explicitly")
-		jobs, err := f.ClientSet.Batch().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
+		jobs, err := f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		_, finishedJobs := filterActiveJobs(jobs)
 		Expect(len(finishedJobs) == 1).To(BeTrue())
@@ -259,7 +259,7 @@ var _ = SIGDescribe("CronJob", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Ensuring there is 1 finished job by listing jobs explicitly")
-		jobs, err = f.ClientSet.Batch().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
+		jobs, err = f.ClientSet.BatchV1().Jobs(f.Namespace.Name).List(metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		_, finishedJobs = filterActiveJobs(jobs)
 		Expect(len(finishedJobs) == 1).To(BeTrue())
@@ -271,21 +271,21 @@ var _ = SIGDescribe("CronJob", func() {
 })
 
 // newTestCronJob returns a cronjob which does one of several testing behaviors.
-func newTestCronJob(name, schedule string, concurrencyPolicy batchv2alpha1.ConcurrencyPolicy,
-	command []string, successfulJobsHistoryLimit *int32) *batchv2alpha1.CronJob {
+func newTestCronJob(name, schedule string, concurrencyPolicy batchv1beta1.ConcurrencyPolicy,
+	command []string, successfulJobsHistoryLimit *int32) *batchv1beta1.CronJob {
 	parallelism := int32(1)
 	completions := int32(1)
-	sj := &batchv2alpha1.CronJob{
+	sj := &batchv1beta1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
 		TypeMeta: metav1.TypeMeta{
 			Kind: "CronJob",
 		},
-		Spec: batchv2alpha1.CronJobSpec{
+		Spec: batchv1beta1.CronJobSpec{
 			Schedule:          schedule,
 			ConcurrencyPolicy: concurrencyPolicy,
-			JobTemplate: batchv2alpha1.JobTemplateSpec{
+			JobTemplate: batchv1beta1.JobTemplateSpec{
 				Spec: batchv1.JobSpec{
 					Parallelism: &parallelism,
 					Completions: &completions,
@@ -303,7 +303,7 @@ func newTestCronJob(name, schedule string, concurrencyPolicy batchv2alpha1.Concu
 							Containers: []v1.Container{
 								{
 									Name:  "c",
-									Image: "gcr.io/google_containers/busybox:1.24",
+									Image: "busybox",
 									VolumeMounts: []v1.VolumeMount{
 										{
 											MountPath: "/data",
@@ -325,22 +325,22 @@ func newTestCronJob(name, schedule string, concurrencyPolicy batchv2alpha1.Concu
 	return sj
 }
 
-func createCronJob(c clientset.Interface, ns string, cronJob *batchv2alpha1.CronJob) (*batchv2alpha1.CronJob, error) {
-	return c.BatchV2alpha1().CronJobs(ns).Create(cronJob)
+func createCronJob(c clientset.Interface, ns string, cronJob *batchv1beta1.CronJob) (*batchv1beta1.CronJob, error) {
+	return c.BatchV1beta1().CronJobs(ns).Create(cronJob)
 }
 
-func getCronJob(c clientset.Interface, ns, name string) (*batchv2alpha1.CronJob, error) {
-	return c.BatchV2alpha1().CronJobs(ns).Get(name, metav1.GetOptions{})
+func getCronJob(c clientset.Interface, ns, name string) (*batchv1beta1.CronJob, error) {
+	return c.BatchV1beta1().CronJobs(ns).Get(name, metav1.GetOptions{})
 }
 
 func deleteCronJob(c clientset.Interface, ns, name string) error {
-	return c.BatchV2alpha1().CronJobs(ns).Delete(name, nil)
+	return c.BatchV1beta1().CronJobs(ns).Delete(name, nil)
 }
 
 // Wait for at least given amount of active jobs.
 func waitForActiveJobs(c clientset.Interface, ns, cronJobName string, active int) error {
 	return wait.Poll(framework.Poll, cronJobTimeout, func() (bool, error) {
-		curr, err := c.BatchV2alpha1().CronJobs(ns).Get(cronJobName, metav1.GetOptions{})
+		curr, err := c.BatchV1beta1().CronJobs(ns).Get(cronJobName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -354,7 +354,7 @@ func waitForActiveJobs(c clientset.Interface, ns, cronJobName string, active int
 // empty after the timeout.
 func waitForNoJobs(c clientset.Interface, ns, jobName string, failIfNonEmpty bool) error {
 	return wait.Poll(framework.Poll, cronJobTimeout, func() (bool, error) {
-		curr, err := c.BatchV2alpha1().CronJobs(ns).Get(jobName, metav1.GetOptions{})
+		curr, err := c.BatchV1beta1().CronJobs(ns).Get(jobName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -370,7 +370,7 @@ func waitForNoJobs(c clientset.Interface, ns, jobName string, failIfNonEmpty boo
 // Wait for a job to not exist by listing jobs explicitly.
 func waitForJobNotExist(c clientset.Interface, ns string, targetJob *batchv1.Job) error {
 	return wait.Poll(framework.Poll, cronJobTimeout, func() (bool, error) {
-		jobs, err := c.Batch().Jobs(ns).List(metav1.ListOptions{})
+		jobs, err := c.BatchV1().Jobs(ns).List(metav1.ListOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -387,7 +387,7 @@ func waitForJobNotExist(c clientset.Interface, ns string, targetJob *batchv1.Job
 // Wait for a job to be replaced with a new one.
 func waitForJobReplaced(c clientset.Interface, ns, previousJobName string) error {
 	return wait.Poll(framework.Poll, cronJobTimeout, func() (bool, error) {
-		jobs, err := c.Batch().Jobs(ns).List(metav1.ListOptions{})
+		jobs, err := c.BatchV1().Jobs(ns).List(metav1.ListOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -406,7 +406,7 @@ func waitForJobReplaced(c clientset.Interface, ns, previousJobName string) error
 // waitForJobsAtLeast waits for at least a number of jobs to appear.
 func waitForJobsAtLeast(c clientset.Interface, ns string, atLeast int) error {
 	return wait.Poll(framework.Poll, cronJobTimeout, func() (bool, error) {
-		jobs, err := c.Batch().Jobs(ns).List(metav1.ListOptions{})
+		jobs, err := c.BatchV1().Jobs(ns).List(metav1.ListOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -417,7 +417,7 @@ func waitForJobsAtLeast(c clientset.Interface, ns string, atLeast int) error {
 // waitForAnyFinishedJob waits for any completed job to appear.
 func waitForAnyFinishedJob(c clientset.Interface, ns string) error {
 	return wait.Poll(framework.Poll, cronJobTimeout, func() (bool, error) {
-		jobs, err := c.Batch().Jobs(ns).List(metav1.ListOptions{})
+		jobs, err := c.BatchV1().Jobs(ns).List(metav1.ListOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -432,11 +432,11 @@ func waitForAnyFinishedJob(c clientset.Interface, ns string) error {
 
 // checkNoEventWithReason checks no events with a reason within a list has occured
 func checkNoEventWithReason(c clientset.Interface, ns, cronJobName string, reasons []string) error {
-	sj, err := c.BatchV2alpha1().CronJobs(ns).Get(cronJobName, metav1.GetOptions{})
+	sj, err := c.BatchV1beta1().CronJobs(ns).Get(cronJobName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("Error in getting cronjob %s/%s: %v", ns, cronJobName, err)
 	}
-	events, err := c.Core().Events(ns).Search(api.Scheme, sj)
+	events, err := c.CoreV1().Events(ns).Search(legacyscheme.Scheme, sj)
 	if err != nil {
 		return fmt.Errorf("Error in listing events: %s", err)
 	}

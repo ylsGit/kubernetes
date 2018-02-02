@@ -19,30 +19,40 @@ limitations under the License.
 package cm
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang/glog"
-	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/cgroups/fs"
 	"github.com/opencontainers/runc/libcontainer/configs"
+
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/record"
+	kubefeatures "k8s.io/kubernetes/pkg/features"
+	internalapi "k8s.io/kubernetes/pkg/kubelet/apis/cri"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
+	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager"
+	"k8s.io/kubernetes/pkg/kubelet/cm/devicemanager"
 	cmutil "k8s.io/kubernetes/pkg/kubelet/cm/util"
+	"k8s.io/kubernetes/pkg/kubelet/config"
+	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/qos"
+	"k8s.io/kubernetes/pkg/kubelet/status"
+	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
 	utilfile "k8s.io/kubernetes/pkg/util/file"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/util/oom"
@@ -104,7 +114,7 @@ type containerManagerImpl struct {
 	qosContainers    QOSContainersInfo
 	// Tasks that are run periodically
 	periodicTasks []func()
-	// holds all the mounted cgroup subsystems
+	// Holds all the mounted cgroup subsystems
 	subsystems *CgroupSubsystems
 	nodeInfo   *v1.Node
 	// Interface for cgroup management
@@ -118,6 +128,10 @@ type containerManagerImpl struct {
 	recorder record.EventRecorder
 	// Interface for QoS cgroup management
 	qosContainerManager QOSContainerManager
+	// Interface for exporting and allocating devices reported by device plugins.
+	deviceManager devicemanager.Manager
+	// Interface for CPU affinity management.
+	cpuManager cpumanager.Manager
 }
 
 type features struct {
@@ -180,48 +194,34 @@ func validateSystemRequirements(mountUtil mount.Interface) (features, error) {
 // TODO(vmarmol): Add limits to the system containers.
 // Takes the absolute name of the specified containers.
 // Empty container name disables use of the specified container.
-func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.Interface, nodeConfig NodeConfig, failSwapOn bool, recorder record.EventRecorder) (ContainerManager, error) {
+func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.Interface, nodeConfig NodeConfig, failSwapOn bool, devicePluginEnabled bool, recorder record.EventRecorder) (ContainerManager, error) {
 	subsystems, err := GetCgroupSubsystems()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mounted cgroup subsystems: %v", err)
 	}
 
 	// Check whether swap is enabled. The Kubelet does not support running with swap enabled.
-	cmd := exec.Command("cat", "/proc/swaps")
-	stdout, err := cmd.StdoutPipe()
+	swapData, err := ioutil.ReadFile("/proc/swaps")
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	var buf []string
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() { // Splits on newlines by default
-		buf = append(buf, scanner.Text())
-	}
-	if err := cmd.Wait(); err != nil { // Clean up
-		return nil, err
-	}
+	swapData = bytes.TrimSpace(swapData) // extra trailing \n
+	swapLines := strings.Split(string(swapData), "\n")
 
-	// Running with swap enabled should be considered an error, but in order to maintain legacy
-	// behavior we have to require an opt-in to this error for a period of time.
 	// If there is more than one line (table headers) in /proc/swaps, swap is enabled and we should
 	// error out unless --fail-swap-on is set to false.
-	if len(buf) > 1 {
-		if failSwapOn {
-			return nil, fmt.Errorf("Running with swap on is not supported, please disable swap! or set --fail-swap-on flag to false. /proc/swaps contained: %v", buf)
-		}
+	if failSwapOn && len(swapLines) > 1 {
+		return nil, fmt.Errorf("Running with swap on is not supported, please disable swap! or set --fail-swap-on flag to false. /proc/swaps contained: %v", swapLines)
 	}
 	var capacity = v1.ResourceList{}
 	// It is safe to invoke `MachineInfo` on cAdvisor before logically initializing cAdvisor here because
 	// machine info is computed and cached once as part of cAdvisor object creation.
 	// But `RootFsInfo` and `ImagesFsInfo` are not available at this moment so they will be called later during manager starts
-	if info, err := cadvisorInterface.MachineInfo(); err == nil {
-		capacity = cadvisor.CapacityFromMachineInfo(info)
-	} else {
+	machineInfo, err := cadvisorInterface.MachineInfo()
+	if err != nil {
 		return nil, err
 	}
+	capacity = cadvisor.CapacityFromMachineInfo(machineInfo)
 
 	cgroupRoot := nodeConfig.CgroupRoot
 	cgroupManager := NewCgroupManager(subsystems, nodeConfig.CgroupDriver)
@@ -240,18 +240,18 @@ func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.I
 			return nil, fmt.Errorf("invalid configuration: cgroup-root %q doesn't exist: %v", cgroupRoot, err)
 		}
 		glog.Infof("container manager verified user specified cgroup-root exists: %v", cgroupRoot)
-		// Include the the top level cgroup for enforcing node allocatable into cgroup-root.
+		// Include the top level cgroup for enforcing node allocatable into cgroup-root.
 		// This way, all sub modules can avoid having to understand the concept of node allocatable.
 		cgroupRoot = path.Join(cgroupRoot, defaultNodeAllocatableCgroupName)
 	}
 	glog.Infof("Creating Container Manager object based on Node Config: %+v", nodeConfig)
 
-	qosContainerManager, err := NewQOSContainerManager(subsystems, cgroupRoot, nodeConfig)
+	qosContainerManager, err := NewQOSContainerManager(subsystems, cgroupRoot, nodeConfig, cgroupManager)
 	if err != nil {
 		return nil, err
 	}
 
-	return &containerManagerImpl{
+	cm := &containerManagerImpl{
 		cadvisorInterface:   cadvisorInterface,
 		mountUtil:           mountUtil,
 		NodeConfig:          nodeConfig,
@@ -261,7 +261,34 @@ func NewContainerManager(mountUtil mount.Interface, cadvisorInterface cadvisor.I
 		cgroupRoot:          cgroupRoot,
 		recorder:            recorder,
 		qosContainerManager: qosContainerManager,
-	}, nil
+	}
+
+	glog.Infof("Creating device plugin manager: %t", devicePluginEnabled)
+	if devicePluginEnabled {
+		cm.deviceManager, err = devicemanager.NewManagerImpl()
+	} else {
+		cm.deviceManager, err = devicemanager.NewManagerStub()
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize CPU manager
+	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CPUManager) {
+		cm.cpuManager, err = cpumanager.NewManager(
+			nodeConfig.ExperimentalCPUManagerPolicy,
+			nodeConfig.ExperimentalCPUManagerReconcilePeriod,
+			machineInfo,
+			cm.GetNodeAllocatableReservation(),
+			nodeConfig.KubeletRootDir,
+		)
+		if err != nil {
+			glog.Errorf("failed to initialize cpu manager: %v", err)
+			return nil, err
+		}
+	}
+
+	return cm, nil
 }
 
 // NewPodContainerManager is a factory method returns a PodContainerManager object
@@ -273,11 +300,16 @@ func (cm *containerManagerImpl) NewPodContainerManager() PodContainerManager {
 			qosContainersInfo: cm.GetQOSContainersInfo(),
 			subsystems:        cm.subsystems,
 			cgroupManager:     cm.cgroupManager,
+			podPidsLimit:      cm.ExperimentalPodPidsLimit,
 		}
 	}
 	return &podContainerManagerNoop{
 		cgroupRoot: CgroupName(cm.cgroupRoot),
 	}
+}
+
+func (cm *containerManagerImpl) InternalContainerLifecycle() InternalContainerLifecycle {
+	return &internalContainerLifecycleImpl{cm.cpuManager}
 }
 
 // Create a cgroup container manager.
@@ -486,7 +518,17 @@ func (cm *containerManagerImpl) Status() Status {
 	return cm.status
 }
 
-func (cm *containerManagerImpl) Start(node *v1.Node, activePods ActivePodsFunc) error {
+func (cm *containerManagerImpl) Start(node *v1.Node,
+	activePods ActivePodsFunc,
+	sourcesReady config.SourcesReady,
+	podStatusProvider status.PodStatusProvider,
+	runtimeService internalapi.RuntimeService) error {
+
+	// Initialize CPU manager
+	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CPUManager) {
+		cm.cpuManager.Start(cpumanager.ActivePodsFunc(activePods), podStatusProvider, runtimeService)
+	}
+
 	// cache the node Info including resource capacity and
 	// allocatable of the node
 	cm.nodeInfo = node
@@ -544,6 +586,11 @@ func (cm *containerManagerImpl) Start(node *v1.Node, activePods ActivePodsFunc) 
 		}
 		close(stopChan)
 	}, time.Second, stopChan)
+
+	// Starts device manager.
+	if err := cm.deviceManager.Start(devicemanager.ActivePodsFunc(activePods), sourcesReady); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -552,26 +599,32 @@ func (cm *containerManagerImpl) setFsCapacity() error {
 	if err != nil {
 		return fmt.Errorf("Fail to get rootfs information %v", err)
 	}
-	hasDedicatedImageFs, _ := cm.cadvisorInterface.HasDedicatedImageFs()
-	var imagesfs cadvisorapiv2.FsInfo
-	if hasDedicatedImageFs {
-		imagesfs, err = cm.cadvisorInterface.ImagesFsInfo()
-		if err != nil {
-			return fmt.Errorf("Fail to get imagefs information %v", err)
-		}
-	}
 
 	cm.Lock()
-	for rName, rCap := range cadvisor.StorageScratchCapacityFromFsInfo(rootfs) {
+	for rName, rCap := range cadvisor.EphemeralStorageCapacityFromFsInfo(rootfs) {
 		cm.capacity[rName] = rCap
-	}
-	if hasDedicatedImageFs {
-		for rName, rCap := range cadvisor.StorageOverlayCapacityFromFsInfo(imagesfs) {
-			cm.capacity[rName] = rCap
-		}
 	}
 	cm.Unlock()
 	return nil
+}
+
+// TODO: move the GetResources logic to PodContainerManager.
+func (cm *containerManagerImpl) GetResources(pod *v1.Pod, container *v1.Container) (*kubecontainer.RunContainerOptions, error) {
+	opts := &kubecontainer.RunContainerOptions{}
+	// Allocate should already be called during predicateAdmitHandler.Admit(),
+	// just try to fetch device runtime information from cached state here
+	devOpts := cm.deviceManager.GetDeviceRunContainerOptions(pod, container)
+	if devOpts == nil {
+		return opts, nil
+	}
+	opts.Devices = append(opts.Devices, devOpts.Devices...)
+	opts.Mounts = append(opts.Mounts, devOpts.Mounts...)
+	opts.Envs = append(opts.Envs, devOpts.Envs...)
+	return opts, nil
+}
+
+func (cm *containerManagerImpl) UpdatePluginResources(node *schedulercache.NodeInfo, attrs *lifecycle.PodAdmitAttributes) error {
+	return cm.deviceManager.Allocate(node, attrs)
 }
 
 func (cm *containerManagerImpl) SystemCgroupsLimit() v1.ResourceList {
@@ -833,4 +886,8 @@ func (cm *containerManagerImpl) GetCapacity() v1.ResourceList {
 	cm.RLock()
 	defer cm.RUnlock()
 	return cm.capacity
+}
+
+func (cm *containerManagerImpl) GetDevicePluginResourceCapacity() (v1.ResourceList, v1.ResourceList, []string) {
+	return cm.deviceManager.GetCapacity()
 }

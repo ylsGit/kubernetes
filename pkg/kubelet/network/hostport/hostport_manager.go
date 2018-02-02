@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -177,11 +178,6 @@ func (hm *hostportManager) Remove(id string, podPortMapping *PodPortMapping) (er
 	chainsToRemove := []utiliptables.Chain{}
 	for _, pm := range hostportMappings {
 		chainsToRemove = append(chainsToRemove, getHostportChain(id, pm))
-
-		// To preserve backward compatibility for k8s 1.5 or earlier.
-		// Need to remove hostport chains added by hostportSyncer if there is any
-		// TODO: remove this in 1.7
-		chainsToRemove = append(chainsToRemove, hostportChainName(pm, getPodFullName(podPortMapping)))
 	}
 
 	// remove rules that consists of target chains
@@ -252,7 +248,7 @@ func (hm *hostportManager) closeHostports(hostportMappings []*PortMapping) error
 // WARNING: Please do not change this function. Otherwise, HostportManager may not be able to
 // identify existing iptables chains.
 func getHostportChain(id string, pm *PortMapping) utiliptables.Chain {
-	hash := sha256.Sum256([]byte(id + string(pm.HostPort) + string(pm.Protocol)))
+	hash := sha256.Sum256([]byte(id + strconv.Itoa(int(pm.HostPort)) + string(pm.Protocol)))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
 	return utiliptables.Chain(kubeHostportChainPrefix + encoded[:16])
 }

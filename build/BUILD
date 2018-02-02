@@ -25,23 +25,23 @@ filegroup(
 # in build/common.sh.
 DOCKERIZED_BINARIES = {
     "cloud-controller-manager": {
-        "base": "@official_busybox//image:image.tar",
+        "base": "@official_busybox//image",
         "target": "//cmd/cloud-controller-manager:cloud-controller-manager",
     },
     "kube-apiserver": {
-        "base": "@official_busybox//image:image.tar",
+        "base": "@official_busybox//image",
         "target": "//cmd/kube-apiserver:kube-apiserver",
     },
     "kube-controller-manager": {
-        "base": "@official_busybox//image:image.tar",
+        "base": "@official_busybox//image",
         "target": "//cmd/kube-controller-manager:kube-controller-manager",
     },
     "kube-scheduler": {
-        "base": "@official_busybox//image:image.tar",
-        "target": "//plugin/cmd/kube-scheduler:kube-scheduler",
+        "base": "@official_busybox//image",
+        "target": "//cmd/kube-scheduler:kube-scheduler",
     },
     "kube-proxy": {
-        "base": "@debian-iptables-amd64//image:image.tar",
+        "base": "@debian-iptables-amd64//image",
         "target": "//cmd/kube-proxy:kube-proxy",
     },
 }
@@ -80,10 +80,16 @@ genrule(
     cmd = """
 grep ^STABLE_BUILD_SCM_REVISION bazel-out/stable-status.txt \
     | awk '{print $$2}' \
-    | sed -e 's/^v//' -e 's/[\+-]/_/g' \
+    | sed -e 's/^v//' -Ee 's/-([a-z]+)/~\\1/' -e 's/-/+/g' \
     >$@
 """,
     stamp = 1,
+)
+
+genrule(
+    name = "cni_package_version",
+    outs = ["cni_version"],
+    cmd = "echo 0.5.1 >$@",
 )
 
 release_filegroup(
@@ -97,7 +103,6 @@ release_filegroup(
     name = "client-targets",
     srcs = [
         "//cmd/kubectl",
-        "//federation/cmd/kubefed",
     ],
 )
 
@@ -106,6 +111,7 @@ release_filegroup(
     name = "node-targets",
     srcs = [
         "//cmd/kube-proxy",
+        "//cmd/kubeadm",
         "//cmd/kubelet",
     ],
 )
@@ -116,12 +122,12 @@ release_filegroup(
 release_filegroup(
     name = "server-targets",
     srcs = [
+        "//cluster/gce/gci/mounter",
         "//cmd/cloud-controller-manager",
         "//cmd/hyperkube",
         "//cmd/kube-apiserver",
         "//cmd/kube-controller-manager",
-        "//cmd/kubeadm",
-        "//plugin/cmd/kube-scheduler",
+        "//cmd/kube-scheduler",
         "//vendor/k8s.io/kube-aggregator",
     ],
 )
@@ -137,7 +143,6 @@ filegroup(
         "//cmd/genyaml",
         "//cmd/kubemark",  # TODO: server platforms only
         "//cmd/linkcheck",
-        "//federation/cmd/genfeddocs",
         "//test/e2e:e2e.test",
         "//test/e2e_node:e2e_node.test",  # TODO: server platforms only
         "//vendor/github.com/onsi/ginkgo/ginkgo",
@@ -148,9 +153,7 @@ filegroup(
 filegroup(
     name = "test-portable-targets",
     srcs = [
-        "//federation/develop:all-srcs",
         "//hack:e2e.go",
-        "//hack:federated-ginkgo-e2e.sh",
         "//hack:get-build.sh",
         "//hack:ginkgo-e2e.sh",
         "//hack/e2e-internal:all-srcs",

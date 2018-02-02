@@ -7,7 +7,11 @@ load(
 
 go_library(
     name = "go_default_library",
-    srcs = ["interfaces.go"],
+    srcs = [
+        "interfaces.go",
+        "rule.go",
+    ],
+    importpath = "k8s.io/apiserver/pkg/authorization/authorizer",
     deps = ["//vendor/k8s.io/apiserver/pkg/authentication/user:go_default_library"],
 )
 

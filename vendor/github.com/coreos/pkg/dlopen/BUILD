@@ -5,13 +5,14 @@ go_library(
     srcs = [
         "dlopen.go",
     ] + select({
-        "@io_bazel_rules_go//go/platform:linux_amd64": [
+        "@io_bazel_rules_go//go/platform:linux": [
             "dlopen_example.go",
         ],
         "//conditions:default": [],
     }),
     cgo = True,
     clinkopts = ["-ldl"],
+    importpath = "github.com/coreos/pkg/dlopen",
     visibility = ["//visibility:public"],
 )
 

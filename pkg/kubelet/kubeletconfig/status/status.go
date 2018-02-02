@@ -26,64 +26,85 @@ import (
 	kuberuntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	utilequal "k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/equal"
 	utillog "k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/log"
 )
 
+// TODO(mtaufen): s/current/assigned, as this is more accurate e.g. if you are using lkg, you aren't currently using "current" :)
 const (
-	configOKType = "ConfigOK"
+	// CurLocalMessage indicates that the Kubelet is using its local config, which consists of defaults, flags, and/or local files
+	CurLocalMessage = "using current: local"
+	// LkgLocalMessage indicates that the Kubelet is using its local config, which consists of defaults, flags, and/or local files
+	LkgLocalMessage = "using last-known-good: local"
 
-	// CurDefaultMessage indicates the Kubelet is using it's current config, which is the default
-	CurDefaultMessage = "using current (default)"
-	// LkgDefaultMessage indicates the Kubelet is using it's last-known-good config, which is the default
-	LkgDefaultMessage = "using last-known-good (default)"
+	// CurRemoteMessageFmt indicates the Kubelet is using its current config, which is from an API source
+	CurRemoteMessageFmt = "using current: %s"
+	// LkgRemoteMessageFmt indicates the Kubelet is using its last-known-good config, which is from an API source
+	LkgRemoteMessageFmt = "using last-known-good: %s"
 
-	// CurInitMessage indicates the Kubelet is using it's current config, which is from the init config files
-	CurInitMessage = "using current (init)"
-	// LkgInitMessage indicates the Kubelet is using it's last-known-good config, which is from the init config files
-	LkgInitMessage = "using last-known-good (init)"
-
-	// CurRemoteMessageFmt indicates the Kubelet is usin it's current config, which is from an API source
-	CurRemoteMessageFmt = "using current (UID: %q)"
-	// LkgRemoteMessageFmt indicates the Kubelet is using it's last-known-good config, which is from an API source
-	LkgRemoteMessageFmt = "using last-known-good (UID: %q)"
-
-	// CurDefaultOKReason indicates that no init config files were provided
-	CurDefaultOKReason = "current is set to the local default, and no init config was provided"
-	// CurInitOKReason indicates that init config files were provided
-	CurInitOKReason = "current is set to the local default, and an init config was provided"
-	// CurRemoteOKReason indicates that the config from an API source passed all checks
-	CurRemoteOKReason = "passed all checks"
+	// CurLocalOkayReason indicates that the Kubelet is using its local config
+	CurLocalOkayReason = "when the config source is nil, the Kubelet uses its local config"
+	// CurRemoteOkayReason indicates that the config referenced by Node.ConfigSource is currently passing all checks
+	CurRemoteOkayReason = "passing all checks"
 
 	// CurFailLoadReasonFmt indicates that the Kubelet failed to load the current config checkpoint for an API source
-	CurFailLoadReasonFmt = "failed to load current (UID: %q)"
+	CurFailLoadReasonFmt = "failed to load current: %s"
 	// CurFailParseReasonFmt indicates that the Kubelet failed to parse the current config checkpoint for an API source
-	CurFailParseReasonFmt = "failed to parse current (UID: %q)"
+	CurFailParseReasonFmt = "failed to parse current: %s"
 	// CurFailValidateReasonFmt indicates that the Kubelet failed to validate the current config checkpoint for an API source
-	CurFailValidateReasonFmt = "failed to validate current (UID: %q)"
-	// CurFailCrashLoopReasonFmt indicates that the Kubelet experienced a crash loop while using the current config checkpoint for an API source
-	CurFailCrashLoopReasonFmt = "current failed trial period due to crash loop (UID %q)"
+	CurFailValidateReasonFmt = "failed to validate current: %s"
+
+	// LkgFail*ReasonFmt reasons are currently used to print errors in the Kubelet log, but do not appear in Node.Status.Conditions
 
 	// LkgFailLoadReasonFmt indicates that the Kubelet failed to load the last-known-good config checkpoint for an API source
-	LkgFailLoadReasonFmt = "failed to load last-known-good (UID: %q)"
+	LkgFailLoadReasonFmt = "failed to load last-known-good: %s"
 	// LkgFailParseReasonFmt indicates that the Kubelet failed to parse the last-known-good config checkpoint for an API source
-	LkgFailParseReasonFmt = "failed to parse last-known-good (UID: %q)"
+	LkgFailParseReasonFmt = "failed to parse last-known-good: %s"
 	// LkgFailValidateReasonFmt indicates that the Kubelet failed to validate the last-known-good config checkpoint for an API source
-	LkgFailValidateReasonFmt = "failed to validate last-known-good (UID: %q)"
+	LkgFailValidateReasonFmt = "failed to validate last-known-good: %s"
 
-	emptyMessage = "unknown - message not provided"
-	emptyReason  = "unknown - reason not provided"
+	// FailSyncReasonFmt is used when the system couldn't sync the config, due to a malformed Node.Spec.ConfigSource, a download failure, etc.
+	FailSyncReasonFmt = "failed to sync, reason: %s"
+	// FailSyncReasonAllNilSubfields is used when no subfields are set
+	FailSyncReasonAllNilSubfields = "invalid NodeConfigSource, exactly one subfield must be non-nil, but all were nil"
+	// FailSyncReasonPartialObjectReference is used when some required subfields remain unset
+	FailSyncReasonPartialObjectReference = "invalid ObjectReference, all of UID, Name, and Namespace must be specified"
+	// FailSyncReasonUIDMismatchFmt is used when there is a UID mismatch between the referenced and downloaded ConfigMaps,
+	// this can happen because objects must be downloaded by namespace/name, rather than by UID
+	FailSyncReasonUIDMismatchFmt = "invalid ConfigSource.ConfigMapRef.UID: %s does not match %s.UID: %s"
+	// FailSyncReasonDownloadFmt is used when the download fails, e.g. due to network issues
+	FailSyncReasonDownloadFmt = "failed to download: %s"
+	// FailSyncReasonInformer is used when the informer fails to report the Node object
+	FailSyncReasonInformer = "failed to read Node from informer object cache"
+	// FailSyncReasonReset is used when we can't reset the local configuration references, e.g. due to filesystem issues
+	FailSyncReasonReset = "failed to reset to local config"
+	// FailSyncReasonCheckpointExistenceFmt is used when we can't determine if a checkpoint already exists, e.g. due to filesystem issues
+	FailSyncReasonCheckpointExistenceFmt = "failed to determine whether object %s with UID %s was already checkpointed"
+	// FailSyncReasonSaveCheckpointFmt is used when we can't save a checkpoint, e.g. due to filesystem issues
+	FailSyncReasonSaveCheckpointFmt = "failed to save config checkpoint for object %s with UID %s"
+	// FailSyncReasonSetCurrentDefault is used when we can't set the current config checkpoint to the local default, e.g. due to filesystem issues
+	FailSyncReasonSetCurrentLocal = "failed to set current config checkpoint to local config"
+	// FailSyncReasonSetCurrentUIDFmt is used when we can't set the current config checkpoint to a checkpointed object, e.g. due to filesystem issues
+	FailSyncReasonSetCurrentUIDFmt = "failed to set current config checkpoint to object %s with UID %s"
+
+	// EmptyMessage is a placeholder in the case that we accidentally set the condition's message to the empty string.
+	// Doing so can result in a partial patch, and thus a confusing status; this makes it clear that the message was not provided.
+	EmptyMessage = "unknown - message not provided"
+	// EmptyReason is a placeholder in the case that we accidentally set the condition's reason to the empty string.
+	// Doing so can result in a partial patch, and thus a confusing status; this makes it clear that the reason was not provided.
+	EmptyReason = "unknown - reason not provided"
 )
 
 // ConfigOKCondition represents a ConfigOK NodeCondition
 type ConfigOKCondition interface {
 	// Set sets the Message, Reason, and Status of the condition
 	Set(message, reason string, status apiv1.ConditionStatus)
-	// SetFailedSyncCondition sets the condition for when syncing Kubelet config fails
-	SetFailedSyncCondition(reason string)
-	// ClearFailedSyncCondition clears the overlay from SetFailedSyncCondition
-	ClearFailedSyncCondition()
+	// SetFailSyncCondition sets the condition for when syncing Kubelet config fails
+	SetFailSyncCondition(reason string)
+	// ClearFailSyncCondition clears the overlay from SetFailSyncCondition
+	ClearFailSyncCondition()
 	// Sync patches the current condition into the Node identified by `nodeName`
 	Sync(client clientset.Interface, nodeName string)
 }
@@ -115,10 +136,10 @@ func (c *configOKCondition) unsafeSet(message, reason string, status apiv1.Condi
 	// We avoid an empty Message, Reason, or Status on the condition. Since we use Patch to update conditions, an empty
 	// field might cause a value from a previous condition to leak through, which can be very confusing.
 	if len(message) == 0 {
-		message = emptyMessage
+		message = EmptyMessage
 	}
 	if len(reason) == 0 {
-		reason = emptyReason
+		reason = EmptyReason
 	}
 	if len(string(status)) == 0 {
 		status = apiv1.ConditionUnknown
@@ -128,7 +149,7 @@ func (c *configOKCondition) unsafeSet(message, reason string, status apiv1.Condi
 		Message: message,
 		Reason:  reason,
 		Status:  status,
-		Type:    configOKType,
+		Type:    apiv1.NodeConfigOK,
 	}
 
 	c.pokeSyncWorker()
@@ -140,18 +161,18 @@ func (c *configOKCondition) Set(message, reason string, status apiv1.ConditionSt
 	c.unsafeSet(message, reason, status)
 }
 
-// SetFailedSyncCondition updates the ConfigOK status to reflect that we failed to sync to the latest config because we couldn't figure out what
-// config to use (e.g. due to a malformed reference, a download failure, etc)
-func (c *configOKCondition) SetFailedSyncCondition(reason string) {
+// SetFailSyncCondition updates the ConfigOK status to reflect that we failed to sync to the latest config,
+// e.g. due to a malformed Node.Spec.ConfigSource, a download failure, etc.
+func (c *configOKCondition) SetFailSyncCondition(reason string) {
 	c.conditionMux.Lock()
 	defer c.conditionMux.Unlock()
 	// set the reason overlay and poke the sync worker to send the update
-	c.failedSyncReason = fmt.Sprintf("failed to sync, desired config unclear, reason: %s", reason)
+	c.failedSyncReason = fmt.Sprintf(FailSyncReasonFmt, reason)
 	c.pokeSyncWorker()
 }
 
-// ClearFailedSyncCondition removes the "failed to sync" reason overlay
-func (c *configOKCondition) ClearFailedSyncCondition() {
+// ClearFailSyncCondition removes the "failed to sync" reason overlay
+func (c *configOKCondition) ClearFailSyncCondition() {
 	c.conditionMux.Lock()
 	defer c.conditionMux.Unlock()
 	// clear the reason overlay and poke the sync worker to send the update
@@ -219,27 +240,28 @@ func (c *configOKCondition) Sync(client clientset.Interface, nodeName string) {
 	// overlay the failedSyncReason if necessary
 	var condition *apiv1.NodeCondition
 	if len(c.failedSyncReason) > 0 {
-		// get a copy of the condition before we edit it
+		// get a copy of the condition before we add the overlay
 		condition = c.condition.DeepCopy()
 		condition.Reason = c.failedSyncReason
+		condition.Status = apiv1.ConditionFalse
 	} else {
 		condition = c.condition
 	}
 
 	// generate the patch
 	mediaType := "application/json"
-	info, ok := kuberuntime.SerializerInfoForMediaType(api.Codecs.SupportedMediaTypes(), mediaType)
+	info, ok := kuberuntime.SerializerInfoForMediaType(legacyscheme.Codecs.SupportedMediaTypes(), mediaType)
 	if !ok {
 		err = fmt.Errorf("unsupported media type %q", mediaType)
 		return
 	}
-	versions := api.Registry.EnabledVersionsForGroup(api.GroupName)
+	versions := legacyscheme.Registry.EnabledVersionsForGroup(api.GroupName)
 	if len(versions) == 0 {
 		err = fmt.Errorf("no enabled versions for group %q", api.GroupName)
 		return
 	}
 	// the "best" version supposedly comes first in the list returned from apiv1.Registry.EnabledVersionsForGroup
-	encoder := api.Codecs.EncoderForVersion(info.Serializer, versions[0])
+	encoder := legacyscheme.Codecs.EncoderForVersion(info.Serializer, versions[0])
 
 	before, err := kuberuntime.Encode(encoder, node)
 	if err != nil {
@@ -247,7 +269,7 @@ func (c *configOKCondition) Sync(client clientset.Interface, nodeName string) {
 		return
 	}
 
-	patchConfigOK(node, c.condition)
+	patchConfigOK(node, condition)
 	after, err := kuberuntime.Encode(encoder, node)
 	if err != nil {
 		err = fmt.Errorf(`failed to encode "after" node while generating patch, error: %v`, err)
@@ -271,7 +293,7 @@ func (c *configOKCondition) Sync(client clientset.Interface, nodeName string) {
 // patchConfigOK replaces or adds the ConfigOK condition to the node
 func patchConfigOK(node *apiv1.Node, configOK *apiv1.NodeCondition) {
 	for i := range node.Status.Conditions {
-		if node.Status.Conditions[i].Type == configOKType {
+		if node.Status.Conditions[i].Type == apiv1.NodeConfigOK {
 			// edit the condition
 			node.Status.Conditions[i] = *configOK
 			return
@@ -281,11 +303,11 @@ func patchConfigOK(node *apiv1.Node, configOK *apiv1.NodeCondition) {
 	node.Status.Conditions = append(node.Status.Conditions, *configOK)
 }
 
-// getConfigOK returns the first NodeCondition in `cs` with Type == configOKType,
+// getConfigOK returns the first NodeCondition in `cs` with Type == apiv1.NodeConfigOK,
 // or if no such condition exists, returns nil.
 func getConfigOK(cs []apiv1.NodeCondition) *apiv1.NodeCondition {
 	for i := range cs {
-		if cs[i].Type == configOKType {
+		if cs[i].Type == apiv1.NodeConfigOK {
 			return &cs[i]
 		}
 	}

@@ -19,6 +19,8 @@ package validation
 import (
 	"fmt"
 	"net"
+
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,8 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/kubernetes/pkg/api"
-	apivalidation "k8s.io/kubernetes/pkg/api/validation"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/security/apparmor"
 	"k8s.io/kubernetes/pkg/security/podsecuritypolicy/seccomp"
@@ -323,9 +325,7 @@ func ValidateDeploymentStatus(status *extensions.DeploymentStatus, fldPath *fiel
 	if status.AvailableReplicas > status.Replicas {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("availableReplicas"), status.AvailableReplicas, msg))
 	}
-	// TODO: ReadyReplicas is introduced in 1.6 and this check breaks the Deployment controller when pre-1.6 clusters get upgraded.
-	// 		 Remove the comparison to zero once we stop supporting upgrades from 1.5.
-	if status.ReadyReplicas > 0 && status.AvailableReplicas > status.ReadyReplicas {
+	if status.AvailableReplicas > status.ReadyReplicas {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("availableReplicas"), status.AvailableReplicas, "cannot be greater than readyReplicas"))
 	}
 	return allErrs
@@ -351,7 +351,7 @@ func ValidateDeploymentStatusUpdate(update, old *extensions.Deployment) field.Er
 	return allErrs
 }
 
-// TODO: Move in "k8s.io/kubernetes/pkg/api/validation"
+// TODO: Move in "k8s.io/kubernetes/pkg/apis/core/validation"
 func isDecremented(update, old *int32) bool {
 	if update == nil && old != nil {
 		return true
@@ -520,17 +520,6 @@ func validateIngressBackend(backend *extensions.IngressBackend, fldPath *field.P
 	return allErrs
 }
 
-func ValidateScale(scale *extensions.Scale) field.ErrorList {
-	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, apivalidation.ValidateObjectMeta(&scale.ObjectMeta, true, apivalidation.NameIsDNSSubdomain, field.NewPath("metadata"))...)
-
-	if scale.Spec.Replicas < 0 {
-		allErrs = append(allErrs, field.Invalid(field.NewPath("spec", "replicas"), scale.Spec.Replicas, "must be greater than or equal to 0"))
-	}
-
-	return allErrs
-}
-
 // ValidateReplicaSetName can be used to check whether the given ReplicaSet
 // name is valid.
 // Prefix indicates this name will be used as part of generation, in which case
@@ -658,9 +647,15 @@ func ValidatePodSecurityPolicySpec(spec *extensions.PodSecurityPolicySpec, fldPa
 	allErrs = append(allErrs, validatePSPSupplementalGroup(fldPath.Child("supplementalGroups"), &spec.SupplementalGroups)...)
 	allErrs = append(allErrs, validatePSPFSGroup(fldPath.Child("fsGroup"), &spec.FSGroup)...)
 	allErrs = append(allErrs, validatePodSecurityPolicyVolumes(fldPath, spec.Volumes)...)
+	if len(spec.RequiredDropCapabilities) > 0 && hasCap(extensions.AllowAllCapabilities, spec.AllowedCapabilities) {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("requiredDropCapabilities"), spec.RequiredDropCapabilities,
+			"must be empty when all capabilities are allowed by a wildcard"))
+	}
 	allErrs = append(allErrs, validatePSPCapsAgainstDrops(spec.RequiredDropCapabilities, spec.DefaultAddCapabilities, field.NewPath("defaultAddCapabilities"))...)
 	allErrs = append(allErrs, validatePSPCapsAgainstDrops(spec.RequiredDropCapabilities, spec.AllowedCapabilities, field.NewPath("allowedCapabilities"))...)
 	allErrs = append(allErrs, validatePSPDefaultAllowPrivilegeEscalation(fldPath.Child("defaultAllowPrivilegeEscalation"), spec.DefaultAllowPrivilegeEscalation, spec.AllowPrivilegeEscalation)...)
+	allErrs = append(allErrs, validatePSPAllowedHostPaths(fldPath.Child("allowedHostPaths"), spec.AllowedHostPaths)...)
+	allErrs = append(allErrs, validatePSPAllowedFlexVolumes(fldPath.Child("allowedFlexVolumes"), spec.AllowedFlexVolumes)...)
 
 	return allErrs
 }
@@ -695,7 +690,47 @@ func ValidatePodSecurityPolicySpecificAnnotations(annotations map[string]string,
 	}
 	if allowed := annotations[seccomp.AllowedProfilesAnnotationKey]; allowed != "" {
 		for _, p := range strings.Split(allowed, ",") {
+			if p == seccomp.AllowAny {
+				continue
+			}
 			allErrs = append(allErrs, apivalidation.ValidateSeccompProfile(p, fldPath.Key(seccomp.AllowedProfilesAnnotationKey))...)
+		}
+	}
+	return allErrs
+}
+
+// validatePSPAllowedHostPaths makes sure all allowed host paths follow:
+// 1. path prefix is required
+// 2. path prefix does not have any element which is ".."
+func validatePSPAllowedHostPaths(fldPath *field.Path, allowedHostPaths []extensions.AllowedHostPath) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	for i, target := range allowedHostPaths {
+		if target.PathPrefix == "" {
+			allErrs = append(allErrs, field.Required(fldPath.Index(i), "is required"))
+			break
+		}
+		parts := strings.Split(filepath.ToSlash(target.PathPrefix), "/")
+		for _, item := range parts {
+			if item == ".." {
+				allErrs = append(allErrs, field.Invalid(fldPath.Index(i), target.PathPrefix, "must not contain '..'"))
+				break // even for `../../..`, one error is sufficient to make the point
+			}
+		}
+	}
+
+	return allErrs
+}
+
+// validatePSPAllowedFlexVolumes
+func validatePSPAllowedFlexVolumes(fldPath *field.Path, flexVolumes []extensions.AllowedFlexVolume) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if len(flexVolumes) > 0 {
+		for idx, fv := range flexVolumes {
+			if len(fv.Driver) == 0 {
+				allErrs = append(allErrs, field.Required(fldPath.Child("allowedFlexVolumes").Index(idx).Child("driver"),
+					"must specify a driver"))
+			}
 		}
 	}
 	return allErrs
@@ -782,7 +817,6 @@ func validatePodSecurityPolicyVolumes(fldPath *field.Path, volumes []extensions.
 			allErrs = append(allErrs, field.NotSupported(fldPath.Child("volumes"), v, allowed.List()))
 		}
 	}
-
 	return allErrs
 }
 

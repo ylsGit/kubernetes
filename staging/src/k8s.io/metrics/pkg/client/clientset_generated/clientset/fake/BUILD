@@ -12,6 +12,7 @@ go_library(
         "doc.go",
         "register.go",
     ],
+    importpath = "k8s.io/metrics/pkg/client/clientset_generated/clientset/fake",
     deps = [
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/runtime:go_default_library",
@@ -22,9 +23,12 @@ go_library(
         "//vendor/k8s.io/client-go/discovery/fake:go_default_library",
         "//vendor/k8s.io/client-go/testing:go_default_library",
         "//vendor/k8s.io/metrics/pkg/apis/metrics/v1alpha1:go_default_library",
+        "//vendor/k8s.io/metrics/pkg/apis/metrics/v1beta1:go_default_library",
         "//vendor/k8s.io/metrics/pkg/client/clientset_generated/clientset:go_default_library",
         "//vendor/k8s.io/metrics/pkg/client/clientset_generated/clientset/typed/metrics/v1alpha1:go_default_library",
         "//vendor/k8s.io/metrics/pkg/client/clientset_generated/clientset/typed/metrics/v1alpha1/fake:go_default_library",
+        "//vendor/k8s.io/metrics/pkg/client/clientset_generated/clientset/typed/metrics/v1beta1:go_default_library",
+        "//vendor/k8s.io/metrics/pkg/client/clientset_generated/clientset/typed/metrics/v1beta1/fake:go_default_library",
     ],
 )
 

@@ -22,8 +22,24 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
+const (
+	// alpha: v1.8 (for Services)
+	//
+	// Allows Services backed by a GCP load balancer to choose what network
+	// tier to use. Currently supports "Standard" and "Premium" (default).
+	AlphaFeatureNetworkTiers = "NetworkTiers"
+
+	AlphaFeatureGCEDisk = "DiskAlphaAPI"
+
+	AlphaFeatureNetworkEndpointGroup = "NetworkEndpointGroup"
+)
+
 // All known alpha features
-var knownAlphaFeatures = map[string]bool{}
+var knownAlphaFeatures = map[string]bool{
+	AlphaFeatureNetworkTiers:         true,
+	AlphaFeatureGCEDisk:              true,
+	AlphaFeatureNetworkEndpointGroup: true,
+}
 
 type AlphaFeatureGate struct {
 	features map[string]bool
@@ -44,4 +60,11 @@ func NewAlphaFeatureGate(features []string) (*AlphaFeatureGate, error) {
 		}
 	}
 	return &AlphaFeatureGate{featureMap}, utilerrors.NewAggregate(errList)
+}
+
+func (gce *GCECloud) alphaFeatureEnabled(feature string) error {
+	if !gce.AlphaFeatureGate.Enabled(feature) {
+		return fmt.Errorf("alpha feature %q is not enabled.", feature)
+	}
+	return nil
 }

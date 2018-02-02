@@ -3,10 +3,16 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "go_default_library",
     srcs = [
+        "build_prune.go",
         "checkpoint_create.go",
         "checkpoint_delete.go",
         "checkpoint_list.go",
         "client.go",
+        "config_create.go",
+        "config_inspect.go",
+        "config_list.go",
+        "config_remove.go",
+        "config_update.go",
         "container_attach.go",
         "container_commit.go",
         "container_copy.go",
@@ -32,6 +38,7 @@ go_library(
         "container_update.go",
         "container_wait.go",
         "disk_usage.go",
+        "distribution_inspect.go",
         "errors.go",
         "events.go",
         "hijack.go",
@@ -65,6 +72,7 @@ go_library(
         "node_list.go",
         "node_remove.go",
         "node_update.go",
+        "parse_logs.go",
         "ping.go",
         "plugin_create.go",
         "plugin_disable.go",
@@ -88,6 +96,7 @@ go_library(
         "service_logs.go",
         "service_remove.go",
         "service_update.go",
+        "session.go",
         "swarm_get_unlock_key.go",
         "swarm_init.go",
         "swarm_inspect.go",
@@ -97,6 +106,7 @@ go_library(
         "swarm_update.go",
         "task_inspect.go",
         "task_list.go",
+        "task_logs.go",
         "transport.go",
         "utils.go",
         "version.go",
@@ -106,26 +116,37 @@ go_library(
         "volume_prune.go",
         "volume_remove.go",
     ] + select({
-        "@io_bazel_rules_go//go/platform:darwin_amd64": [
+        "@io_bazel_rules_go//go/platform:darwin": [
             "client_unix.go",
         ],
-        "@io_bazel_rules_go//go/platform:linux_amd64": [
+        "@io_bazel_rules_go//go/platform:freebsd": [
             "client_unix.go",
         ],
-        "@io_bazel_rules_go//go/platform:windows_amd64": [
+        "@io_bazel_rules_go//go/platform:linux": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:openbsd": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:solaris": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:windows": [
             "client_windows.go",
         ],
         "//conditions:default": [],
     }),
+    importpath = "github.com/docker/docker/client",
     visibility = ["//visibility:public"],
     deps = [
         "//vendor/github.com/docker/distribution/reference:go_default_library",
+        "//vendor/github.com/docker/docker/api:go_default_library",
         "//vendor/github.com/docker/docker/api/types:go_default_library",
         "//vendor/github.com/docker/docker/api/types/container:go_default_library",
         "//vendor/github.com/docker/docker/api/types/events:go_default_library",
         "//vendor/github.com/docker/docker/api/types/filters:go_default_library",
+        "//vendor/github.com/docker/docker/api/types/image:go_default_library",
         "//vendor/github.com/docker/docker/api/types/network:go_default_library",
-        "//vendor/github.com/docker/docker/api/types/reference:go_default_library",
         "//vendor/github.com/docker/docker/api/types/registry:go_default_library",
         "//vendor/github.com/docker/docker/api/types/swarm:go_default_library",
         "//vendor/github.com/docker/docker/api/types/time:go_default_library",
@@ -134,6 +155,7 @@ go_library(
         "//vendor/github.com/docker/docker/pkg/tlsconfig:go_default_library",
         "//vendor/github.com/docker/go-connections/sockets:go_default_library",
         "//vendor/github.com/docker/go-connections/tlsconfig:go_default_library",
+        "//vendor/github.com/opencontainers/go-digest:go_default_library",
         "//vendor/github.com/pkg/errors:go_default_library",
         "//vendor/golang.org/x/net/context:go_default_library",
         "//vendor/golang.org/x/net/context/ctxhttp:go_default_library",

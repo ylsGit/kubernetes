@@ -19,18 +19,21 @@ limitations under the License.
 package mount
 
 import (
-	"fmt"
-	"path"
+	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/golang/glog"
 )
+
+type FileType string
 
 const (
 	// Default mount command if mounter path is not specified
-	defaultMountCommand  = "mount"
-	MountsInGlobalPDPath = "mounts"
+	defaultMountCommand           = "mount"
+	MountsInGlobalPDPath          = "mounts"
+	FileTypeDirectory    FileType = "Directory"
+	FileTypeFile         FileType = "File"
+	FileTypeSocket       FileType = "Socket"
+	FileTypeCharDev      FileType = "CharDevice"
+	FileTypeBlockDev     FileType = "BlockDevice"
 )
 
 type Interface interface {
@@ -67,6 +70,21 @@ type Interface interface {
 	// GetDeviceNameFromMount finds the device name by checking the mount path
 	// to get the global mount path which matches its plugin directory
 	GetDeviceNameFromMount(mountPath, pluginDir string) (string, error)
+	// MakeRShared checks that given path is on a mount with 'rshared' mount
+	// propagation. If not, it bind-mounts the path as rshared.
+	MakeRShared(path string) error
+	// GetFileType checks for file/directory/socket/block/character devices.
+	// Will operate in the host mount namespace if kubelet is running in a container
+	GetFileType(pathname string) (FileType, error)
+	// MakeFile creates an empty file.
+	// Will operate in the host mount namespace if kubelet is running in a container
+	MakeFile(pathname string) error
+	// MakeDir creates a new directory.
+	// Will operate in the host mount namespace if kubelet is running in a container
+	MakeDir(pathname string) error
+	// ExistsPath checks whether the path exists.
+	// Will operate in the host mount namespace if kubelet is running in a container
+	ExistsPath(pathname string) bool
 }
 
 // Exec executes command where mount utilities are. This can be either the host,
@@ -116,35 +134,32 @@ func (mounter *SafeFormatAndMount) FormatAndMount(source string, target string, 
 	return mounter.formatAndMount(source, target, fstype, options)
 }
 
-// GetMountRefs finds all other references to the device referenced
+// GetMountRefsByDev finds all references to the device provided
 // by mountPath; returns a list of paths.
-func GetMountRefs(mounter Interface, mountPath string) ([]string, error) {
+func GetMountRefsByDev(mounter Interface, mountPath string) ([]string, error) {
 	mps, err := mounter.List()
 	if err != nil {
 		return nil, err
 	}
-
-	// Find the device name.
-	deviceName := ""
-	// If mountPath is symlink, need get its target path.
 	slTarget, err := filepath.EvalSymlinks(mountPath)
 	if err != nil {
 		slTarget = mountPath
 	}
+
+	// Finding the device mounted to mountPath
+	diskDev := ""
 	for i := range mps {
-		if mps[i].Path == slTarget {
-			deviceName = mps[i].Device
+		if slTarget == mps[i].Path {
+			diskDev = mps[i].Device
 			break
 		}
 	}
 
 	// Find all references to the device.
 	var refs []string
-	if deviceName == "" {
-		glog.Warningf("could not determine device for path: %q", mountPath)
-	} else {
-		for i := range mps {
-			if mps[i].Device == deviceName && mps[i].Path != slTarget {
+	for i := range mps {
+		if mps[i].Device == diskDev || mps[i].Device == slTarget {
+			if mps[i].Path != slTarget {
 				refs = append(refs, mps[i].Path)
 			}
 		}
@@ -185,34 +200,6 @@ func GetDeviceNameFromMount(mounter Interface, mountPath string) (string, int, e
 	return device, refCount, nil
 }
 
-// getDeviceNameFromMount find the device name from /proc/mounts in which
-// the mount path reference should match the given plugin directory. In case no mount path reference
-// matches, returns the volume name taken from its given mountPath
-func getDeviceNameFromMount(mounter Interface, mountPath, pluginDir string) (string, error) {
-	refs, err := GetMountRefs(mounter, mountPath)
-	if err != nil {
-		glog.V(4).Infof("GetMountRefs failed for mount path %q: %v", mountPath, err)
-		return "", err
-	}
-	if len(refs) == 0 {
-		glog.V(4).Infof("Directory %s is not mounted", mountPath)
-		return "", fmt.Errorf("directory %s is not mounted", mountPath)
-	}
-	basemountPath := path.Join(pluginDir, MountsInGlobalPDPath)
-	for _, ref := range refs {
-		if strings.HasPrefix(ref, basemountPath) {
-			volumeID, err := filepath.Rel(basemountPath, ref)
-			if err != nil {
-				glog.Errorf("Failed to get volume id from mount %s - %v", mountPath, err)
-				return "", err
-			}
-			return volumeID, nil
-		}
-	}
-
-	return path.Base(mountPath), nil
-}
-
 // IsNotMountPoint determines if a directory is a mountpoint.
 // It should return ErrNotExist when the directory does not exist.
 // This method uses the List() of all mountpoints
@@ -222,6 +209,12 @@ func IsNotMountPoint(mounter Interface, file string) (bool, error) {
 	// IsLikelyNotMountPoint provides a quick check
 	// to determine whether file IS A mountpoint
 	notMnt, notMntErr := mounter.IsLikelyNotMountPoint(file)
+	if notMntErr != nil && os.IsPermission(notMntErr) {
+		// We were not allowed to do the simple stat() check, e.g. on NFS with
+		// root_squash. Fall back to /proc/mounts check below.
+		notMnt = true
+		notMntErr = nil
+	}
 	if notMntErr != nil {
 		return notMnt, notMntErr
 	}
@@ -242,4 +235,29 @@ func IsNotMountPoint(mounter Interface, file string) (bool, error) {
 		}
 	}
 	return notMnt, nil
+}
+
+// isBind detects whether a bind mount is being requested and makes the remount options to
+// use in case of bind mount, due to the fact that bind mount doesn't respect mount options.
+// The list equals:
+//   options - 'bind' + 'remount' (no duplicate)
+func isBind(options []string) (bool, []string) {
+	bindRemountOpts := []string{"remount"}
+	bind := false
+
+	if len(options) != 0 {
+		for _, option := range options {
+			switch option {
+			case "bind":
+				bind = true
+				break
+			case "remount":
+				break
+			default:
+				bindRemountOpts = append(bindRemountOpts, option)
+			}
+		}
+	}
+
+	return bind, bindRemountOpts
 }

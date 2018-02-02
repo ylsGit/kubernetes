@@ -23,6 +23,7 @@ import (
 
 	appsv1beta1 "k8s.io/api/apps/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
+	batchv1beta1 "k8s.io/api/batch/v1beta1"
 	batchv2alpha1 "k8s.io/api/batch/v2alpha1"
 	"k8s.io/api/core/v1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
@@ -30,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/kubernetes/pkg/api"
 )
 
 type DeploymentV1Beta1 struct{}
@@ -101,8 +101,6 @@ func (DeploymentV1Beta1) Generate(genericParams map[string]interface{}) (runtime
 		return nil, err
 	}
 
-	// TODO: use versioned types for generators so that we don't need to
-	// set default values manually (see issue #17384)
 	count32 := int32(count)
 	deployment := extensionsv1beta1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -483,6 +481,107 @@ func (CronJobV2Alpha1) Generate(genericParams map[string]interface{}) (runtime.O
 	return &cronJob, nil
 }
 
+type CronJobV1Beta1 struct{}
+
+func (CronJobV1Beta1) ParamNames() []GeneratorParam {
+	return []GeneratorParam{
+		{"labels", false},
+		{"default-name", false},
+		{"name", true},
+		{"image", true},
+		{"image-pull-policy", false},
+		{"port", false},
+		{"hostport", false},
+		{"stdin", false},
+		{"leave-stdin-open", false},
+		{"tty", false},
+		{"command", false},
+		{"args", false},
+		{"env", false},
+		{"requests", false},
+		{"limits", false},
+		{"restart", false},
+		{"schedule", true},
+		{"serviceaccount", false},
+	}
+}
+
+func (CronJobV1Beta1) Generate(genericParams map[string]interface{}) (runtime.Object, error) {
+	args, err := getArgs(genericParams)
+	if err != nil {
+		return nil, err
+	}
+
+	envs, err := getEnvs(genericParams)
+	if err != nil {
+		return nil, err
+	}
+
+	params, err := getParams(genericParams)
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := getName(params)
+	if err != nil {
+		return nil, err
+	}
+
+	labels, err := getLabels(params, name)
+	if err != nil {
+		return nil, err
+	}
+
+	podSpec, err := makePodSpec(params, name)
+	if err != nil {
+		return nil, err
+	}
+
+	imagePullPolicy := v1.PullPolicy(params["image-pull-policy"])
+	if err = updatePodContainers(params, args, envs, imagePullPolicy, podSpec); err != nil {
+		return nil, err
+	}
+
+	leaveStdinOpen, err := GetBool(params, "leave-stdin-open", false)
+	if err != nil {
+		return nil, err
+	}
+	podSpec.Containers[0].StdinOnce = !leaveStdinOpen && podSpec.Containers[0].Stdin
+
+	if err := updatePodPorts(params, podSpec); err != nil {
+		return nil, err
+	}
+
+	restartPolicy := v1.RestartPolicy(params["restart"])
+	if len(restartPolicy) == 0 {
+		restartPolicy = v1.RestartPolicyNever
+	}
+	podSpec.RestartPolicy = restartPolicy
+
+	cronJob := batchv1beta1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: labels,
+		},
+		Spec: batchv1beta1.CronJobSpec{
+			Schedule:          params["schedule"],
+			ConcurrencyPolicy: batchv1beta1.AllowConcurrent,
+			JobTemplate: batchv1beta1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: v1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labels,
+						},
+						Spec: *podSpec,
+					},
+				},
+			},
+		},
+	}
+
+	return &cronJob, nil
+}
+
 type BasicReplicationController struct{}
 
 func (BasicReplicationController) ParamNames() []GeneratorParam {
@@ -504,31 +603,6 @@ func (BasicReplicationController) ParamNames() []GeneratorParam {
 		{"limits", false},
 		{"serviceaccount", false},
 	}
-}
-
-// populateResourceList takes strings of form <resourceName1>=<value1>,<resourceName1>=<value2>
-// and returns ResourceList.
-func populateResourceList(spec string) (api.ResourceList, error) {
-	// empty input gets a nil response to preserve generator test expected behaviors
-	if spec == "" {
-		return nil, nil
-	}
-
-	result := api.ResourceList{}
-	resourceStatements := strings.Split(spec, ",")
-	for _, resourceStatement := range resourceStatements {
-		parts := strings.Split(resourceStatement, "=")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("Invalid argument syntax %v, expected <resource>=<value>", resourceStatement)
-		}
-		resourceName := api.ResourceName(parts[0])
-		resourceQuantity, err := resource.ParseQuantity(parts[1])
-		if err != nil {
-			return nil, err
-		}
-		result[resourceName] = resourceQuantity
-	}
-	return result, nil
 }
 
 // populateResourceListV1 takes strings of form <resourceName1>=<value1>,<resourceName1>=<value2>
@@ -553,23 +627,6 @@ func populateResourceListV1(spec string) (v1.ResourceList, error) {
 		}
 		result[resourceName] = resourceQuantity
 	}
-	return result, nil
-}
-
-// HandleResourceRequirements parses the limits and requests parameters if specified
-// and returns ResourceRequirements.
-func HandleResourceRequirements(params map[string]string) (api.ResourceRequirements, error) {
-	result := api.ResourceRequirements{}
-	limits, err := populateResourceList(params["limits"])
-	if err != nil {
-		return result, err
-	}
-	result.Limits = limits
-	requests, err := populateResourceList(params["requests"])
-	if err != nil {
-		return result, err
-	}
-	result.Requests = requests
 	return result, nil
 }
 

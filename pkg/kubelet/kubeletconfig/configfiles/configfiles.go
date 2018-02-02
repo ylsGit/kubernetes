@@ -24,7 +24,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/apis/kubeletconfig"
 	kubeletscheme "k8s.io/kubernetes/pkg/kubelet/apis/kubeletconfig/scheme"
 	utilcodec "k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/codec"
-	utilfs "k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/filesystem"
+	utilfs "k8s.io/kubernetes/pkg/util/filesystem"
 )
 
 // Loader loads configuration from a storage layer
@@ -39,12 +39,12 @@ type fsLoader struct {
 	fs utilfs.Filesystem
 	// kubeletCodecs is the scheme used to decode config files
 	kubeletCodecs *serializer.CodecFactory
-	// configDir is the absolute path to the directory containing the configuration files
-	configDir string
+	// kubeletFile is an absolute path to the file containing a serialized KubeletConfiguration
+	kubeletFile string
 }
 
-// NewFSLoader returns a Loader that loads a KubeletConfiguration from the files in `configDir`
-func NewFSLoader(fs utilfs.Filesystem, configDir string) (Loader, error) {
+// NewFsLoader returns a Loader that loads a KubeletConfiguration from the `kubeletFile`
+func NewFsLoader(fs utilfs.Filesystem, kubeletFile string) (Loader, error) {
 	_, kubeletCodecs, err := kubeletscheme.NewSchemeAndCodecs()
 	if err != nil {
 		return nil, err
@@ -53,24 +53,38 @@ func NewFSLoader(fs utilfs.Filesystem, configDir string) (Loader, error) {
 	return &fsLoader{
 		fs:            fs,
 		kubeletCodecs: kubeletCodecs,
-		configDir:     configDir,
+		kubeletFile:   kubeletFile,
 	}, nil
 }
 
 func (loader *fsLoader) Load() (*kubeletconfig.KubeletConfiguration, error) {
-	errfmt := fmt.Sprintf("failed to load Kubelet config files from %q, error: ", loader.configDir) + "%v"
-
-	// require the config be in a file called "kubelet"
-	path := filepath.Join(loader.configDir, "kubelet")
-	data, err := loader.fs.ReadFile(path)
+	data, err := loader.fs.ReadFile(loader.kubeletFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read init config file %q, error: %v", path, err)
+		return nil, fmt.Errorf("failed to read kubelet config file %q, error: %v", loader.kubeletFile, err)
 	}
 
 	// no configuration is an error, some parameters are required
 	if len(data) == 0 {
-		return nil, fmt.Errorf(errfmt, fmt.Errorf("config file was empty, but some parameters are required"))
+		return nil, fmt.Errorf("kubelet config file %q was empty", loader.kubeletFile)
 	}
 
-	return utilcodec.DecodeKubeletConfiguration(loader.kubeletCodecs, data)
+	kc, err := utilcodec.DecodeKubeletConfiguration(loader.kubeletCodecs, data)
+	if err != nil {
+		return nil, err
+	}
+
+	// make all paths absolute
+	resolveRelativePaths(kubeletconfig.KubeletConfigurationPathRefs(kc), filepath.Dir(loader.kubeletFile))
+	return kc, nil
+}
+
+// resolveRelativePaths makes relative paths absolute by resolving them against `root`
+func resolveRelativePaths(paths []*string, root string) {
+	for _, path := range paths {
+		// leave empty paths alone, "no path" is a valid input
+		// do not attempt to resolve paths that are already absolute
+		if len(*path) > 0 && !filepath.IsAbs(*path) {
+			*path = filepath.Join(root, *path)
+		}
+	}
 }

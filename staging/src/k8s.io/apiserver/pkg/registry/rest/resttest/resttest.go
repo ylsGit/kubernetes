@@ -47,15 +47,13 @@ type Tester struct {
 	generatesName       bool
 	returnDeletedObject bool
 	namer               func(int) string
-	scheme              *runtime.Scheme
 }
 
-func New(t *testing.T, storage rest.Storage, scheme *runtime.Scheme) *Tester {
+func New(t *testing.T, storage rest.Storage) *Tester {
 	return &Tester{
 		T:       t,
 		storage: storage,
 		namer:   defaultNamer,
-		scheme:  scheme,
 	}
 }
 
@@ -207,6 +205,7 @@ func (t *Tester) TestList(valid runtime.Object, assignFn AssignFunc) {
 	t.testListNotFound(assignFn)
 	t.testListFound(valid.DeepCopyObject(), assignFn)
 	t.testListMatchLabels(valid.DeepCopyObject(), assignFn)
+	t.testListTableConversion(valid.DeepCopyObject(), assignFn)
 }
 
 // Test watching objects.
@@ -243,7 +242,7 @@ func (t *Tester) testCreateAlreadyExisting(obj runtime.Object, createFn CreateFu
 	}
 	defer t.delete(ctx, foo)
 
-	_, err := t.storage.(rest.Creater).Create(ctx, foo, false)
+	_, err := t.storage.(rest.Creater).Create(ctx, foo, rest.ValidateAllObjectFunc, false)
 	if !errors.IsAlreadyExists(err) {
 		t.Errorf("expected already exists err, got %v", err)
 	}
@@ -255,7 +254,7 @@ func (t *Tester) testCreateEquals(obj runtime.Object, getFn GetFunc) {
 	foo := obj.DeepCopyObject()
 	t.setObjectMeta(foo, t.namer(2))
 
-	created, err := t.storage.(rest.Creater).Create(ctx, foo, false)
+	created, err := t.storage.(rest.Creater).Create(ctx, foo, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -283,7 +282,7 @@ func (t *Tester) testCreateDiscardsObjectNamespace(valid runtime.Object) {
 	objectMeta.SetNamespace("not-default")
 
 	// Ideally, we'd get an error back here, but at least verify the namespace wasn't persisted
-	created, err := t.storage.(rest.Creater).Create(t.TestContext(), valid.DeepCopyObject(), false)
+	created, err := t.storage.(rest.Creater).Create(t.TestContext(), valid.DeepCopyObject(), rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -299,7 +298,7 @@ func (t *Tester) testCreateGeneratesName(valid runtime.Object) {
 	objectMeta.SetName("")
 	objectMeta.SetGenerateName("test-")
 
-	created, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, false)
+	created, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -314,7 +313,7 @@ func (t *Tester) testCreateHasMetadata(valid runtime.Object) {
 	objectMeta.SetName(t.namer(1))
 	objectMeta.SetNamespace(t.TestNamespace())
 
-	obj, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, false)
+	obj, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -332,7 +331,7 @@ func (t *Tester) testCreateIgnoresContextNamespace(valid runtime.Object) {
 	ctx := genericapirequest.WithNamespace(genericapirequest.NewContext(), "not-default2")
 
 	// Ideally, we'd get an error back here, but at least verify the namespace wasn't persisted
-	created, err := t.storage.(rest.Creater).Create(ctx, valid.DeepCopyObject(), false)
+	created, err := t.storage.(rest.Creater).Create(ctx, valid.DeepCopyObject(), rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -351,7 +350,7 @@ func (t *Tester) testCreateIgnoresMismatchedNamespace(valid runtime.Object) {
 	ctx := genericapirequest.WithNamespace(genericapirequest.NewContext(), "not-default2")
 
 	// Ideally, we'd get an error back here, but at least verify the namespace wasn't persisted
-	created, err := t.storage.(rest.Creater).Create(ctx, valid.DeepCopyObject(), false)
+	created, err := t.storage.(rest.Creater).Create(ctx, valid.DeepCopyObject(), rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -369,7 +368,7 @@ func (t *Tester) testCreateValidatesNames(valid runtime.Object) {
 		objCopyMeta.SetName(invalidName)
 
 		ctx := t.TestContext()
-		_, err := t.storage.(rest.Creater).Create(ctx, objCopy, false)
+		_, err := t.storage.(rest.Creater).Create(ctx, objCopy, rest.ValidateAllObjectFunc, false)
 		if !errors.IsInvalid(err) {
 			t.Errorf("%s: Expected to get an invalid resource error, got '%v'", invalidName, err)
 		}
@@ -381,7 +380,7 @@ func (t *Tester) testCreateValidatesNames(valid runtime.Object) {
 		objCopyMeta.SetName(objCopyMeta.GetName() + invalidSuffix)
 
 		ctx := t.TestContext()
-		_, err := t.storage.(rest.Creater).Create(ctx, objCopy, false)
+		_, err := t.storage.(rest.Creater).Create(ctx, objCopy, rest.ValidateAllObjectFunc, false)
 		if !errors.IsInvalid(err) {
 			t.Errorf("%s: Expected to get an invalid resource error, got '%v'", invalidSuffix, err)
 		}
@@ -391,7 +390,7 @@ func (t *Tester) testCreateValidatesNames(valid runtime.Object) {
 func (t *Tester) testCreateInvokesValidation(invalid ...runtime.Object) {
 	for i, obj := range invalid {
 		ctx := t.TestContext()
-		_, err := t.storage.(rest.Creater).Create(ctx, obj, false)
+		_, err := t.storage.(rest.Creater).Create(ctx, obj, rest.ValidateAllObjectFunc, false)
 		if !errors.IsInvalid(err) {
 			t.Errorf("%d: Expected to get an invalid resource error, got %v", i, err)
 		}
@@ -402,7 +401,7 @@ func (t *Tester) testCreateRejectsMismatchedNamespace(valid runtime.Object) {
 	objectMeta := t.getObjectMetaOrFail(valid)
 	objectMeta.SetNamespace("not-default")
 
-	_, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, false)
+	_, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, rest.ValidateAllObjectFunc, false)
 	if err == nil {
 		t.Errorf("Expected an error, but we didn't get one")
 	} else if !strings.Contains(err.Error(), "does not match the namespace sent on the request") {
@@ -416,7 +415,7 @@ func (t *Tester) testCreateResetsUserData(valid runtime.Object) {
 	objectMeta.SetUID("bad-uid")
 	objectMeta.SetCreationTimestamp(now)
 
-	obj, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, false)
+	obj, err := t.storage.(rest.Creater).Create(t.TestContext(), valid, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -434,7 +433,7 @@ func (t *Tester) testCreateIgnoreClusterName(valid runtime.Object) {
 	objectMeta.SetName(t.namer(3))
 	objectMeta.SetClusterName("clustername-to-ignore")
 
-	obj, err := t.storage.(rest.Creater).Create(t.TestContext(), valid.DeepCopyObject(), false)
+	obj, err := t.storage.(rest.Creater).Create(t.TestContext(), valid.DeepCopyObject(), rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -463,7 +462,7 @@ func (t *Tester) testUpdateEquals(obj runtime.Object, createFn CreateFunc, getFn
 	}
 	toUpdate = updateFn(toUpdate)
 	toUpdateMeta := t.getObjectMetaOrFail(toUpdate)
-	updated, created, err := t.storage.(rest.Updater).Update(ctx, toUpdateMeta.GetName(), rest.DefaultUpdatedObjectInfo(toUpdate, t.scheme))
+	updated, created, err := t.storage.(rest.Updater).Update(ctx, toUpdateMeta.GetName(), rest.DefaultUpdatedObjectInfo(toUpdate), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -503,7 +502,7 @@ func (t *Tester) testUpdateFailsOnVersionTooOld(obj runtime.Object, createFn Cre
 	olderMeta := t.getObjectMetaOrFail(older)
 	olderMeta.SetResourceVersion("1")
 
-	_, _, err = t.storage.(rest.Updater).Update(t.TestContext(), olderMeta.GetName(), rest.DefaultUpdatedObjectInfo(older, t.scheme))
+	_, _, err = t.storage.(rest.Updater).Update(t.TestContext(), olderMeta.GetName(), rest.DefaultUpdatedObjectInfo(older), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err == nil {
 		t.Errorf("Expected an error, but we didn't get one")
 	} else if !errors.IsConflict(err) {
@@ -523,7 +522,7 @@ func (t *Tester) testUpdateInvokesValidation(obj runtime.Object, createFn Create
 	for _, update := range invalidUpdateFn {
 		toUpdate := update(foo.DeepCopyObject())
 		toUpdateMeta := t.getObjectMetaOrFail(toUpdate)
-		got, created, err := t.storage.(rest.Updater).Update(t.TestContext(), toUpdateMeta.GetName(), rest.DefaultUpdatedObjectInfo(toUpdate, t.scheme))
+		got, created, err := t.storage.(rest.Updater).Update(t.TestContext(), toUpdateMeta.GetName(), rest.DefaultUpdatedObjectInfo(toUpdate), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 		if got != nil || created {
 			t.Errorf("expected nil object and no creation for object: %v", toUpdate)
 		}
@@ -544,7 +543,7 @@ func (t *Tester) testUpdateWithWrongUID(obj runtime.Object, createFn CreateFunc,
 	}
 	objectMeta.SetUID(types.UID("UID1111"))
 
-	obj, created, err := t.storage.(rest.Updater).Update(ctx, objectMeta.GetName(), rest.DefaultUpdatedObjectInfo(foo, t.scheme))
+	obj, created, err := t.storage.(rest.Updater).Update(ctx, objectMeta.GetName(), rest.DefaultUpdatedObjectInfo(foo), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if created || obj != nil {
 		t.Errorf("expected nil object and no creation for object: %v", foo)
 	}
@@ -588,7 +587,7 @@ func (t *Tester) testUpdateRetrievesOldObject(obj runtime.Object, createFn Creat
 		return updatedObject, nil
 	}
 
-	updatedObj, created, err := t.storage.(rest.Updater).Update(ctx, objectMeta.GetName(), rest.DefaultUpdatedObjectInfo(storedFooWithUpdates, t.scheme, noopTransform))
+	updatedObj, created, err := t.storage.(rest.Updater).Update(ctx, objectMeta.GetName(), rest.DefaultUpdatedObjectInfo(storedFooWithUpdates, noopTransform), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 		return
@@ -623,7 +622,7 @@ func (t *Tester) testUpdatePropagatesUpdatedObjectError(obj runtime.Object, crea
 		return nil, propagateErr
 	}
 
-	_, _, err := t.storage.(rest.Updater).Update(ctx, name, rest.DefaultUpdatedObjectInfo(foo, t.scheme, noopTransform))
+	_, _, err := t.storage.(rest.Updater).Update(ctx, name, rest.DefaultUpdatedObjectInfo(foo, noopTransform), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err != propagateErr {
 		t.Errorf("expected propagated error, got %#v", err)
 	}
@@ -649,7 +648,7 @@ func (t *Tester) testUpdateIgnoreGenerationUpdates(obj runtime.Object, createFn 
 	olderMeta := t.getObjectMetaOrFail(older)
 	olderMeta.SetGeneration(2)
 
-	_, _, err = t.storage.(rest.Updater).Update(t.TestContext(), olderMeta.GetName(), rest.DefaultUpdatedObjectInfo(older, t.scheme))
+	_, _, err = t.storage.(rest.Updater).Update(t.TestContext(), olderMeta.GetName(), rest.DefaultUpdatedObjectInfo(older), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -665,7 +664,7 @@ func (t *Tester) testUpdateIgnoreGenerationUpdates(obj runtime.Object, createFn 
 
 func (t *Tester) testUpdateOnNotFound(obj runtime.Object) {
 	t.setObjectMeta(obj, t.namer(0))
-	_, created, err := t.storage.(rest.Updater).Update(t.TestContext(), t.namer(0), rest.DefaultUpdatedObjectInfo(obj, t.scheme))
+	_, created, err := t.storage.(rest.Updater).Update(t.TestContext(), t.namer(0), rest.DefaultUpdatedObjectInfo(obj), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if t.createOnUpdate {
 		if err != nil {
 			t.Errorf("creation allowed on updated, but got an error: %v", err)
@@ -700,7 +699,7 @@ func (t *Tester) testUpdateRejectsMismatchedNamespace(obj runtime.Object, create
 	objectMeta.SetName(t.namer(1))
 	objectMeta.SetNamespace("not-default")
 
-	obj, updated, err := t.storage.(rest.Updater).Update(t.TestContext(), "foo1", rest.DefaultUpdatedObjectInfo(storedFoo, t.scheme))
+	obj, updated, err := t.storage.(rest.Updater).Update(t.TestContext(), "foo1", rest.DefaultUpdatedObjectInfo(storedFoo), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if obj != nil || updated {
 		t.Errorf("expected nil object and not updated")
 	}
@@ -731,7 +730,7 @@ func (t *Tester) testUpdateIgnoreClusterName(obj runtime.Object, createFn Create
 	olderMeta := t.getObjectMetaOrFail(older)
 	olderMeta.SetClusterName("clustername-to-ignore")
 
-	_, _, err = t.storage.(rest.Updater).Update(t.TestContext(), olderMeta.GetName(), rest.DefaultUpdatedObjectInfo(older, t.scheme))
+	_, _, err = t.storage.(rest.Updater).Update(t.TestContext(), olderMeta.GetName(), rest.DefaultUpdatedObjectInfo(older), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -1063,14 +1062,14 @@ func (t *Tester) testGetDifferentNamespace(obj runtime.Object) {
 
 	ctx1 := genericapirequest.WithNamespace(genericapirequest.NewContext(), "bar3")
 	objMeta.SetNamespace(genericapirequest.NamespaceValue(ctx1))
-	_, err := t.storage.(rest.Creater).Create(ctx1, obj, false)
+	_, err := t.storage.(rest.Creater).Create(ctx1, obj, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
 	ctx2 := genericapirequest.WithNamespace(genericapirequest.NewContext(), "bar4")
 	objMeta.SetNamespace(genericapirequest.NamespaceValue(ctx2))
-	_, err = t.storage.(rest.Creater).Create(ctx2, obj, false)
+	_, err = t.storage.(rest.Creater).Create(ctx2, obj, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1104,7 +1103,7 @@ func (t *Tester) testGetFound(obj runtime.Object) {
 	ctx := t.TestContext()
 	t.setObjectMeta(obj, t.namer(1))
 
-	existing, err := t.storage.(rest.Creater).Create(ctx, obj, false)
+	existing, err := t.storage.(rest.Creater).Create(ctx, obj, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1127,7 +1126,7 @@ func (t *Tester) testGetMimatchedNamespace(obj runtime.Object) {
 	objMeta := t.getObjectMetaOrFail(obj)
 	objMeta.SetName(t.namer(4))
 	objMeta.SetNamespace(genericapirequest.NamespaceValue(ctx1))
-	_, err := t.storage.(rest.Creater).Create(ctx1, obj, false)
+	_, err := t.storage.(rest.Creater).Create(ctx1, obj, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1146,7 +1145,7 @@ func (t *Tester) testGetMimatchedNamespace(obj runtime.Object) {
 func (t *Tester) testGetNotFound(obj runtime.Object) {
 	ctx := t.TestContext()
 	t.setObjectMeta(obj, t.namer(2))
-	_, err := t.storage.(rest.Creater).Create(ctx, obj, false)
+	_, err := t.storage.(rest.Creater).Create(ctx, obj, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1253,6 +1252,108 @@ func (t *Tester) testListNotFound(assignFn AssignFunc) {
 	}
 	if len(items) != 0 {
 		t.Errorf("unexpected items: %#v", items)
+	}
+}
+
+// testListTableConversion verifies a set of known bounds and expected limitations for the values
+// returned from a TableList. These conditions may be changed if necessary with adequate review.
+func (t *Tester) testListTableConversion(obj runtime.Object, assignFn AssignFunc) {
+	ctx := t.TestContext()
+	testLabels := map[string]string{"key": "value"}
+
+	foo3 := obj.DeepCopyObject()
+	t.setObjectMeta(foo3, "foo3")
+	foo4 := obj.DeepCopyObject()
+	foo4Meta := t.getObjectMetaOrFail(foo4)
+	foo4Meta.SetName("foo4")
+	foo4Meta.SetNamespace(genericapirequest.NamespaceValue(ctx))
+	foo4Meta.SetLabels(testLabels)
+
+	objs := ([]runtime.Object{foo3, foo4})
+
+	assignFn(objs)
+
+	options := &metainternalversion.ListOptions{}
+	listObj, err := t.storage.(rest.Lister).List(ctx, options)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	items, err := listToItems(listObj)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(items) != len(objs) {
+		t.Errorf("unexpected number of items: %v", len(items))
+	}
+	if !apiequality.Semantic.DeepEqual(objs, items) {
+		t.Errorf("expected: %#v, got: %#v", objs, items)
+	}
+
+	m, err := meta.ListAccessor(listObj)
+	if err != nil {
+		t.Fatalf("list should support ListMeta %T: %v", listObj, err)
+	}
+	m.SetContinue("continuetoken")
+	m.SetResourceVersion("11")
+	m.SetSelfLink("/list/link")
+
+	table, err := t.storage.(rest.TableConvertor).ConvertToTable(ctx, listObj, nil)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if table.ResourceVersion != "11" || table.SelfLink != "/list/link" || table.Continue != "continuetoken" {
+		t.Errorf("printer lost list meta: %#v", table.ListMeta)
+	}
+	if len(table.Rows) != len(items) {
+		t.Errorf("unexpected number of rows: %v", len(table.Rows))
+	}
+	columns := table.ColumnDefinitions
+	if len(columns) == 0 {
+		t.Errorf("unexpected number of columns: %v", len(columns))
+	}
+	if columns[0].Name != "Name" || columns[0].Type != "string" || columns[0].Format != "name" {
+		t.Errorf("expect column 0 to be the name column: %#v", columns[0])
+	}
+	for j, column := range columns {
+		if len(column.Name) == 0 {
+			t.Errorf("column %d has no name", j)
+		}
+		switch column.Type {
+		case "string", "date", "integer":
+		default:
+			t.Errorf("column %d has unexpected type: %q", j, column.Type)
+		}
+		switch {
+		case column.Format == "":
+		case column.Format == "name" && column.Type == "string":
+		default:
+			t.Errorf("column %d has unexpected format: %q with type %q", j, column.Format, column.Type)
+		}
+		if column.Priority < 0 || column.Priority > 2 {
+			t.Errorf("column %d has unexpected priority: %q", j, column.Priority)
+		}
+		if len(column.Description) == 0 {
+			t.Errorf("column %d has no description", j)
+		}
+		if column.Name == "Created At" && column.Type != "date" && column.Format != "" {
+			t.Errorf("column %d looks like a created at column, but has a different type and format: %#v", j, column)
+		}
+	}
+	for i, row := range table.Rows {
+		if len(row.Cells) != len(table.ColumnDefinitions) {
+			t.Errorf("row %d did not have the correct number of cells: %d in %v", i, len(table.ColumnDefinitions), row.Cells)
+		}
+		for j, cell := range row.Cells {
+			// do not add to this test without discussion - may break clients
+			switch cell.(type) {
+			case float64, int64, int32, int, string, bool:
+			case []interface{}:
+			default:
+				t.Errorf("row %d, cell %d has an unrecognized type, only JSON serialization safe types are allowed: %T ", i, j, cell)
+			}
+		}
+		if len(row.Cells) != len(table.ColumnDefinitions) {
+		}
 	}
 }
 

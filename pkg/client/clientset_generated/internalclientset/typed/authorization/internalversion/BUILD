@@ -15,9 +15,12 @@ go_library(
         "localsubjectaccessreview_expansion.go",
         "selfsubjectaccessreview.go",
         "selfsubjectaccessreview_expansion.go",
+        "selfsubjectrulesreview.go",
+        "selfsubjectrulesreview_expansion.go",
         "subjectaccessreview.go",
         "subjectaccessreview_expansion.go",
     ],
+    importpath = "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/authorization/internalversion",
     deps = [
         "//pkg/apis/authorization:go_default_library",
         "//pkg/client/clientset_generated/internalclientset/scheme:go_default_library",

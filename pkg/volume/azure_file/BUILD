@@ -14,6 +14,7 @@ go_library(
         "azure_util.go",
         "doc.go",
     ],
+    importpath = "k8s.io/kubernetes/pkg/volume/azure_file",
     deps = [
         "//pkg/cloudprovider:go_default_library",
         "//pkg/cloudprovider/providers/azure:go_default_library",
@@ -34,13 +35,15 @@ go_library(
 go_test(
     name = "go_default_test",
     srcs = ["azure_file_test.go"],
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/pkg/volume/azure_file",
     deps = [
         "//pkg/cloudprovider/providers/azure:go_default_library",
         "//pkg/cloudprovider/providers/fake:go_default_library",
         "//pkg/util/mount:go_default_library",
         "//pkg/volume:go_default_library",
         "//pkg/volume/testing:go_default_library",
+        "//vendor/github.com/Azure/go-autorest/autorest/to:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",

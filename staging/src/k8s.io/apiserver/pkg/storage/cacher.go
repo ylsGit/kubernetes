@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
-	"strconv"
 	"sync"
 	"time"
 
@@ -37,6 +36,8 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/apiserver/pkg/features"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	utiltrace "k8s.io/apiserver/pkg/util/trace"
 	"k8s.io/client-go/tools/cache"
 )
@@ -51,8 +52,6 @@ type CacherConfig struct {
 
 	// An underlying storage.Versioner.
 	Versioner Versioner
-
-	Copier runtime.ObjectCopier
 
 	// The Cache will be caching objects of a given Type and assumes that they
 	// are all stored under ResourcePrefix directory in the underlying database.
@@ -159,8 +158,6 @@ type Cacher struct {
 	// Underlying storage.Interface.
 	storage Interface
 
-	copier runtime.ObjectCopier
-
 	// Expected type of objects in the underlying cache.
 	objectType reflect.Type
 
@@ -210,7 +207,6 @@ func NewCacherFromConfig(config CacherConfig) *Cacher {
 	cacher := &Cacher{
 		ready:       newReady(),
 		storage:     config.Storage,
-		copier:      config.Copier,
 		objectType:  reflect.TypeOf(config.Type),
 		watchCache:  watchCache,
 		reflector:   cache.NewNamedReflector(reflectorName, listerWatcher, config.Type, watchCache, 0),
@@ -293,7 +289,7 @@ func (c *Cacher) Delete(ctx context.Context, key string, out runtime.Object, pre
 
 // Implements storage.Interface.
 func (c *Cacher) Watch(ctx context.Context, key string, resourceVersion string, pred SelectionPredicate) (watch.Interface, error) {
-	watchRV, err := ParseWatchResourceVersion(resourceVersion)
+	watchRV, err := c.versioner.ParseWatchResourceVersion(resourceVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +337,7 @@ func (c *Cacher) Watch(ctx context.Context, key string, resourceVersion string, 
 	c.Lock()
 	defer c.Unlock()
 	forget := forgetWatcher(c, c.watcherIdx, triggerValue, triggerSupported)
-	watcher := newCacheWatcher(c.copier, watchRV, chanSize, initEvents, watchFilterFunction(key, pred), forget)
+	watcher := newCacheWatcher(watchRV, chanSize, initEvents, watchFilterFunction(key, pred), forget, c.versioner)
 
 	c.watchers.addWatcher(watcher, c.watcherIdx, triggerValue, triggerSupported)
 	c.watcherIdx++
@@ -364,7 +360,7 @@ func (c *Cacher) Get(ctx context.Context, key string, resourceVersion string, ob
 	// If resourceVersion is specified, serve it from cache.
 	// It's guaranteed that the returned value is at least that
 	// fresh as the given resourceVersion.
-	getRV, err := ParseListResourceVersion(resourceVersion)
+	getRV, err := c.versioner.ParseListResourceVersion(resourceVersion)
 	if err != nil {
 		return err
 	}
@@ -406,16 +402,18 @@ func (c *Cacher) Get(ctx context.Context, key string, resourceVersion string, ob
 
 // Implements storage.Interface.
 func (c *Cacher) GetToList(ctx context.Context, key string, resourceVersion string, pred SelectionPredicate, listObj runtime.Object) error {
-	if resourceVersion == "" {
+	pagingEnabled := utilfeature.DefaultFeatureGate.Enabled(features.APIListChunking)
+	if resourceVersion == "" || (pagingEnabled && (len(pred.Continue) > 0 || pred.Limit > 0)) {
 		// If resourceVersion is not specified, serve it from underlying
-		// storage (for backward compatibility).
+		// storage (for backward compatibility). If a continuation or limit is
+		// requested, serve it from the underlying storage as well.
 		return c.storage.GetToList(ctx, key, resourceVersion, pred, listObj)
 	}
 
 	// If resourceVersion is specified, serve it from cache.
 	// It's guaranteed that the returned value is at least that
 	// fresh as the given resourceVersion.
-	listRV, err := ParseListResourceVersion(resourceVersion)
+	listRV, err := c.versioner.ParseListResourceVersion(resourceVersion)
 	if err != nil {
 		return err
 	}
@@ -459,7 +457,7 @@ func (c *Cacher) GetToList(ctx context.Context, key string, resourceVersion stri
 		}
 	}
 	if c.versioner != nil {
-		if err := c.versioner.UpdateList(listObj, readResourceVersion); err != nil {
+		if err := c.versioner.UpdateList(listObj, readResourceVersion, ""); err != nil {
 			return err
 		}
 	}
@@ -468,16 +466,23 @@ func (c *Cacher) GetToList(ctx context.Context, key string, resourceVersion stri
 
 // Implements storage.Interface.
 func (c *Cacher) List(ctx context.Context, key string, resourceVersion string, pred SelectionPredicate, listObj runtime.Object) error {
-	if resourceVersion == "" {
+	pagingEnabled := utilfeature.DefaultFeatureGate.Enabled(features.APIListChunking)
+	hasContinuation := pagingEnabled && len(pred.Continue) > 0
+	hasLimit := pagingEnabled && pred.Limit > 0 && resourceVersion != "0"
+	if resourceVersion == "" || hasContinuation || hasLimit {
 		// If resourceVersion is not specified, serve it from underlying
-		// storage (for backward compatibility).
+		// storage (for backward compatibility). If a continuation is
+		// requested, serve it from the underlying storage as well.
+		// Limits are only sent to storage when resourceVersion is non-zero
+		// since the watch cache isn't able to perform continuations, and
+		// limits are ignored when resource version is zero.
 		return c.storage.List(ctx, key, resourceVersion, pred, listObj)
 	}
 
 	// If resourceVersion is specified, serve it from cache.
 	// It's guaranteed that the returned value is at least that
 	// fresh as the given resourceVersion.
-	listRV, err := ParseListResourceVersion(resourceVersion)
+	listRV, err := c.versioner.ParseListResourceVersion(resourceVersion)
 	if err != nil {
 		return err
 	}
@@ -527,7 +532,7 @@ func (c *Cacher) List(ctx context.Context, key string, resourceVersion string, p
 	}
 	trace.Step(fmt.Sprintf("Filtered %d items", listVal.Len()))
 	if c.versioner != nil {
-		if err := c.versioner.UpdateList(listObj, readResourceVersion); err != nil {
+		if err := c.versioner.UpdateList(listObj, readResourceVersion, ""); err != nil {
 			return err
 		}
 	}
@@ -643,7 +648,15 @@ func (c *Cacher) isStopped() bool {
 }
 
 func (c *Cacher) Stop() {
+	// avoid stopping twice (note: cachers are shared with subresources)
+	if c.isStopped() {
+		return
+	}
 	c.stopLock.Lock()
+	if c.stopped {
+		c.stopLock.Unlock()
+		return
+	}
 	c.stopped = true
 	c.stopLock.Unlock()
 	close(c.stopCh)
@@ -662,18 +675,22 @@ func forgetWatcher(c *Cacher, index int, triggerValue string, triggerSupported b
 			glog.V(1).Infof("Forcing watcher close due to unresponsiveness: %v", c.objectType.String())
 		}
 		// It's possible that the watcher is already not in the structure (e.g. in case of
-		// simulaneous Stop() and terminateAllWatchers(), but it doesn't break anything.
+		// simultaneous Stop() and terminateAllWatchers(), but it doesn't break anything.
 		c.watchers.deleteWatcher(index, triggerValue, triggerSupported)
 	}
 }
 
 func filterFunction(key string, p SelectionPredicate) func(string, runtime.Object) bool {
-	f := SimpleFilter(p)
 	filterFunc := func(objKey string, obj runtime.Object) bool {
 		if !hasPathPrefix(objKey, key) {
 			return false
 		}
-		return f(obj)
+		matches, err := p.Matches(obj)
+		if err != nil {
+			glog.Errorf("invalid object for matching. Obj: %v. Err: %v", obj, err)
+			return false
+		}
+		return matches
 	}
 	return filterFunc
 }
@@ -693,11 +710,7 @@ func (c *Cacher) LastSyncResourceVersion() (uint64, error) {
 	c.ready.wait()
 
 	resourceVersion := c.reflector.LastSyncResourceVersion()
-	if resourceVersion == "" {
-		return 0, nil
-	}
-
-	return strconv.ParseUint(resourceVersion, 10, 64)
+	return c.versioner.ParseListResourceVersion(resourceVersion)
 }
 
 // cacherListerWatcher opaques storage.Interface to expose cache.ListerWatcher.
@@ -729,7 +742,7 @@ func (lw *cacherListerWatcher) Watch(options metav1.ListOptions) (watch.Interfac
 	return lw.storage.WatchList(context.TODO(), lw.resourcePrefix, options.ResourceVersion, Everything)
 }
 
-// cacherWatch implements watch.Interface to return a single error
+// errWatcher implements watch.Interface to return a single error
 type errWatcher struct {
 	result chan watch.Event
 }
@@ -769,27 +782,27 @@ func (c *errWatcher) Stop() {
 	// no-op
 }
 
-// cacherWatch implements watch.Interface
+// cachWatcher implements watch.Interface
 type cacheWatcher struct {
 	sync.Mutex
-	copier  runtime.ObjectCopier
-	input   chan *watchCacheEvent
-	result  chan watch.Event
-	done    chan struct{}
-	filter  watchFilterFunc
-	stopped bool
-	forget  func(bool)
+	input     chan *watchCacheEvent
+	result    chan watch.Event
+	done      chan struct{}
+	filter    watchFilterFunc
+	stopped   bool
+	forget    func(bool)
+	versioner Versioner
 }
 
-func newCacheWatcher(copier runtime.ObjectCopier, resourceVersion uint64, chanSize int, initEvents []*watchCacheEvent, filter watchFilterFunc, forget func(bool)) *cacheWatcher {
+func newCacheWatcher(resourceVersion uint64, chanSize int, initEvents []*watchCacheEvent, filter watchFilterFunc, forget func(bool), versioner Versioner) *cacheWatcher {
 	watcher := &cacheWatcher{
-		copier:  copier,
-		input:   make(chan *watchCacheEvent, chanSize),
-		result:  make(chan watch.Event, chanSize),
-		done:    make(chan struct{}),
-		filter:  filter,
-		stopped: false,
-		forget:  forget,
+		input:     make(chan *watchCacheEvent, chanSize),
+		result:    make(chan watch.Event, chanSize),
+		done:      make(chan struct{}),
+		filter:    filter,
+		stopped:   false,
+		forget:    forget,
+		versioner: versioner,
 	}
 	go watcher.process(initEvents, resourceVersion)
 	return watcher
@@ -878,7 +891,12 @@ func (c *cacheWatcher) sendWatchCacheEvent(event *watchCacheEvent) {
 	case curObjPasses && oldObjPasses:
 		watchEvent = watch.Event{Type: watch.Modified, Object: event.Object.DeepCopyObject()}
 	case !curObjPasses && oldObjPasses:
-		watchEvent = watch.Event{Type: watch.Deleted, Object: event.PrevObject.DeepCopyObject()}
+		// return a delete event with the previous object content, but with the event's resource version
+		oldObj := event.PrevObject.DeepCopyObject()
+		if err := c.versioner.UpdateObject(oldObj, event.ResourceVersion); err != nil {
+			utilruntime.HandleError(fmt.Errorf("failure to version api object (%d) %#v: %v", event.ResourceVersion, oldObj, err))
+		}
+		watchEvent = watch.Event{Type: watch.Deleted, Object: oldObj}
 	}
 
 	// We need to ensure that if we put event X to the c.result, all

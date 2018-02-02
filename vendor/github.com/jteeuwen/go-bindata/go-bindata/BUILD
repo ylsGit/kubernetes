@@ -7,13 +7,15 @@ go_library(
         "main.go",
         "version.go",
     ],
+    importpath = "github.com/jteeuwen/go-bindata/go-bindata",
     visibility = ["//visibility:private"],
     deps = ["//vendor/github.com/jteeuwen/go-bindata:go_default_library"],
 )
 
 go_binary(
     name = "go-bindata",
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "github.com/jteeuwen/go-bindata/go-bindata",
     visibility = ["//visibility:public"],
 )
 

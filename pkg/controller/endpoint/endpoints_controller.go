@@ -32,14 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/v1/endpoints"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/util/metrics"
 
@@ -76,8 +75,8 @@ var (
 // NewEndpointController returns a new *EndpointController.
 func NewEndpointController(podInformer coreinformers.PodInformer, serviceInformer coreinformers.ServiceInformer,
 	endpointsInformer coreinformers.EndpointsInformer, client clientset.Interface) *EndpointController {
-	if client != nil && client.Core().RESTClient().GetRateLimiter() != nil {
-		metrics.RegisterMetricAndTrackRateLimiterUsage("endpoint_controller", client.Core().RESTClient().GetRateLimiter())
+	if client != nil && client.CoreV1().RESTClient().GetRateLimiter() != nil {
+		metrics.RegisterMetricAndTrackRateLimiterUsage("endpoint_controller", client.CoreV1().RESTClient().GetRateLimiter())
 	}
 	e := &EndpointController{
 		client:           client,
@@ -145,7 +144,7 @@ type EndpointController struct {
 	workerLoopPeriod time.Duration
 }
 
-// Runs e; will not return until stopCh is closed. workers determines how many
+// Run will not return until stopCh is closed. workers determines how many
 // endpoints will be handled in parallel.
 func (e *EndpointController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -216,6 +215,10 @@ func podToEndpointAddress(pod *v1.Pod) *v1.EndpointAddress {
 }
 
 func podChanged(oldPod, newPod *v1.Pod) bool {
+	// If the pod's deletion timestamp is set, remove endpoint from ready address.
+	if newPod.DeletionTimestamp != oldPod.DeletionTimestamp {
+		return true
+	}
 	// If the pod's readiness has changed, the associated endpoint address
 	// will move from the unready endpoints set to the ready endpoints.
 	// So for the purposes of an endpoint, a readiness change on a pod
@@ -396,7 +399,7 @@ func (e *EndpointController) syncService(key string) error {
 		// service is deleted. However, if we're down at the time when
 		// the service is deleted, we will miss that deletion, so this
 		// doesn't completely solve the problem. See #6877.
-		err = e.client.Core().Endpoints(namespace).Delete(name, nil)
+		err = e.client.CoreV1().Endpoints(namespace).Delete(name, nil)
 		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
@@ -499,11 +502,7 @@ func (e *EndpointController) syncService(key string) error {
 		glog.V(5).Infof("endpoints are equal for %s/%s, skipping update", service.Namespace, service.Name)
 		return nil
 	}
-	copy, err := scheme.Scheme.DeepCopy(currentEndpoints)
-	if err != nil {
-		return err
-	}
-	newEndpoints := copy.(*v1.Endpoints)
+	newEndpoints := currentEndpoints.DeepCopy()
 	newEndpoints.Subsets = subsets
 	newEndpoints.Labels = service.Labels
 	if newEndpoints.Annotations == nil {
@@ -513,10 +512,10 @@ func (e *EndpointController) syncService(key string) error {
 	glog.V(4).Infof("Update endpoints for %v/%v, ready: %d not ready: %d", service.Namespace, service.Name, totalReadyEps, totalNotReadyEps)
 	if createEndpoints {
 		// No previous endpoints, create them
-		_, err = e.client.Core().Endpoints(service.Namespace).Create(newEndpoints)
+		_, err = e.client.CoreV1().Endpoints(service.Namespace).Create(newEndpoints)
 	} else {
 		// Pre-existing
-		_, err = e.client.Core().Endpoints(service.Namespace).Update(newEndpoints)
+		_, err = e.client.CoreV1().Endpoints(service.Namespace).Update(newEndpoints)
 	}
 	if err != nil {
 		if createEndpoints && errors.IsForbidden(err) {

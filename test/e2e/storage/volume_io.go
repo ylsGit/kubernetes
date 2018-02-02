@@ -40,9 +40,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	"k8s.io/kubernetes/test/e2e/storage/utils"
 )
 
-const minFileSize = 1 * framework.MiB
+const (
+	minFileSize = 1 * framework.MiB
+
+	fileSizeSmall  = 1 * framework.MiB
+	fileSizeMedium = 100 * framework.MiB
+	fileSizeLarge  = 1 * framework.GiB
+)
+
+// MD5 hashes of the test file corresponding to each file size.
+// Test files are generated in testVolumeIO()
+// If test file generation algorithm changes, these must be recomputed.
+var md5hashes = map[int64]string{
+	fileSizeSmall:  "5c34c2813223a7ca05a3c2f38c0d1710",
+	fileSizeMedium: "f2fa202b1ffeedda5f3a58bd1ae81104",
+	fileSizeLarge:  "8d763edc71bd16217664793b5a15e403",
+}
 
 // Return the plugin's client pod spec. Use an InitContainer to setup the file i/o test env.
 func makePodSpec(config framework.VolumeTestConfig, dir, initCmd string, volsrc v1.VolumeSource, podSecContext *v1.PodSecurityContext) *v1.Pod {
@@ -111,7 +127,7 @@ func writeToFile(pod *v1.Pod, fpath, dd_input string, fsize int64) error {
 	By(fmt.Sprintf("writing %d bytes to test file %s", fsize, fpath))
 	loopCnt := fsize / minFileSize
 	writeCmd := fmt.Sprintf("i=0; while [ $i -lt %d ]; do dd if=%s bs=%d >>%s 2>/dev/null; let i+=1; done", loopCnt, dd_input, minFileSize, fpath)
-	_, err := podExec(pod, writeCmd)
+	_, err := utils.PodExec(pod, writeCmd)
 
 	return err
 }
@@ -119,7 +135,7 @@ func writeToFile(pod *v1.Pod, fpath, dd_input string, fsize int64) error {
 // Verify that the test file is the expected size and contains the expected content.
 func verifyFile(pod *v1.Pod, fpath string, expectSize int64, dd_input string) error {
 	By("verifying file size")
-	rtnstr, err := podExec(pod, fmt.Sprintf("stat -c %%s %s", fpath))
+	rtnstr, err := utils.PodExec(pod, fmt.Sprintf("stat -c %%s %s", fpath))
 	if err != nil || rtnstr == "" {
 		return fmt.Errorf("unable to get file size via `stat %s`: %v", fpath, err)
 	}
@@ -131,22 +147,20 @@ func verifyFile(pod *v1.Pod, fpath string, expectSize int64, dd_input string) er
 		return fmt.Errorf("size of file %s is %d, expected %d", fpath, size, expectSize)
 	}
 
-	By("verifying file content")
-	// use `grep ... -f` rather than the expected content in a variable to reduce logging
-	rtnstr, err = podExec(pod, fmt.Sprintf("grep -c -m1 -f %s %s", dd_input, fpath))
+	By("verifying file hash")
+	rtnstr, err = utils.PodExec(pod, fmt.Sprintf("md5sum %s | cut -d' ' -f1", fpath))
 	if err != nil {
-		return fmt.Errorf("unable to test file content via `grep %s`: %v", fpath, err)
+		return fmt.Errorf("unable to test file hash via `md5sum %s`: %v", fpath, err)
 	}
-	foundCnt, err := strconv.Atoi(strings.TrimSuffix(rtnstr, "\n"))
-	if err != nil {
-		return fmt.Errorf("unable to convert string %q to int: %v", rtnstr, err)
+	actualHash := strings.TrimSuffix(rtnstr, "\n")
+	expectedHash, ok := md5hashes[expectSize]
+	if !ok {
+		return fmt.Errorf("File hash is unknown for file size %d. Was a new file size added to the test suite?",
+			expectSize)
 	}
-	if foundCnt == 0 {
-		rtnstr, err = podExec(pod, fmt.Sprintf("cat %s", dd_input))
-		if err != nil || len(rtnstr) == 0 {
-			return fmt.Errorf("string not found in file %s and unable to read dd's input file %s: %v", fpath, dd_input, err)
-		}
-		return fmt.Errorf("string %q not found in file %s", rtnstr, fpath)
+	if actualHash != expectedHash {
+		return fmt.Errorf("MD5 hash is incorrect for file %s with size %d. Expected: `%s`; Actual: `%s`",
+			fpath, expectSize, expectedHash, actualHash)
 	}
 
 	return nil
@@ -155,7 +169,7 @@ func verifyFile(pod *v1.Pod, fpath string, expectSize int64, dd_input string) er
 // Delete `fpath` to save some disk space on host. Delete errors are logged but ignored.
 func deleteFile(pod *v1.Pod, fpath string) {
 	By(fmt.Sprintf("deleting test file %s...", fpath))
-	_, err := podExec(pod, fmt.Sprintf("rm -f %s", fpath))
+	_, err := utils.PodExec(pod, fmt.Sprintf("rm -f %s", fpath))
 	if err != nil {
 		// keep going, the test dir will be deleted when the volume is unmounted
 		framework.Logf("unable to delete test file %s: %v\nerror ignored, continuing test", fpath, err)
@@ -224,7 +238,7 @@ func testVolumeIO(f *framework.Framework, cs clientset.Interface, config framewo
 
 // These tests need privileged containers which are disabled by default.
 // TODO: support all of the plugins tested in storage/volumes.go
-var _ = SIGDescribe("Volume plugin streaming [Slow]", func() {
+var _ = utils.SIGDescribe("Volume plugin streaming [Slow]", func() {
 	f := framework.NewDefaultFramework("volume-io")
 	var (
 		config    framework.VolumeTestConfig
@@ -270,7 +284,7 @@ var _ = SIGDescribe("Volume plugin streaming [Slow]", func() {
 		})
 
 		It("should write files of various sizes, verify size, validate content", func() {
-			fileSizes := []int64{1 * framework.MiB, 100 * framework.MiB, 1 * framework.GiB}
+			fileSizes := []int64{fileSizeSmall, fileSizeMedium, fileSizeLarge}
 			err := testVolumeIO(f, cs, config, volSource, &podSec, testFile, fileSizes)
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -315,7 +329,7 @@ var _ = SIGDescribe("Volume plugin streaming [Slow]", func() {
 		})
 
 		It("should write files of various sizes, verify size, validate content", func() {
-			fileSizes := []int64{1 * framework.MiB, 100 * framework.MiB}
+			fileSizes := []int64{fileSizeSmall, fileSizeMedium}
 			err := testVolumeIO(f, cs, config, volSource, nil /*no secContext*/, testFile, fileSizes)
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -349,7 +363,7 @@ var _ = SIGDescribe("Volume plugin streaming [Slow]", func() {
 		})
 
 		It("should write files of various sizes, verify size, validate content", func() {
-			fileSizes := []int64{1 * framework.MiB, 100 * framework.MiB}
+			fileSizes := []int64{fileSizeSmall, fileSizeMedium}
 			fsGroup := int64(1234)
 			podSec := v1.PodSecurityContext{
 				FSGroup: &fsGroup,
@@ -424,7 +438,7 @@ var _ = SIGDescribe("Volume plugin streaming [Slow]", func() {
 		})
 
 		It("should write files of various sizes, verify size, validate content", func() {
-			fileSizes := []int64{1 * framework.MiB, 100 * framework.MiB}
+			fileSizes := []int64{fileSizeSmall, fileSizeMedium}
 			fsGroup := int64(1234)
 			podSec := v1.PodSecurityContext{
 				FSGroup: &fsGroup,

@@ -20,9 +20,11 @@ go_library(
         "mux.go",
         "server.go",
         "session.go",
+        "streamlocal.go",
         "tcpip.go",
         "transport.go",
     ],
+    importpath = "golang.org/x/crypto/ssh",
     visibility = ["//visibility:public"],
     deps = [
         "//vendor/golang.org/x/crypto/curve25519:go_default_library",

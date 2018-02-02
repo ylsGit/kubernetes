@@ -97,14 +97,16 @@ type DeploymentController struct {
 }
 
 // NewDeploymentController creates a new DeploymentController.
-func NewDeploymentController(dInformer extensionsinformers.DeploymentInformer, rsInformer extensionsinformers.ReplicaSetInformer, podInformer coreinformers.PodInformer, client clientset.Interface) *DeploymentController {
+func NewDeploymentController(dInformer extensionsinformers.DeploymentInformer, rsInformer extensionsinformers.ReplicaSetInformer, podInformer coreinformers.PodInformer, client clientset.Interface) (*DeploymentController, error) {
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(glog.Infof)
 	// TODO: remove the wrapper when every clients have moved to use the clientset.
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(client.Core().RESTClient()).Events("")})
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(client.CoreV1().RESTClient()).Events("")})
 
-	if client != nil && client.Core().RESTClient().GetRateLimiter() != nil {
-		metrics.RegisterMetricAndTrackRateLimiterUsage("deployment_controller", client.Core().RESTClient().GetRateLimiter())
+	if client != nil && client.CoreV1().RESTClient().GetRateLimiter() != nil {
+		if err := metrics.RegisterMetricAndTrackRateLimiterUsage("deployment_controller", client.CoreV1().RESTClient().GetRateLimiter()); err != nil {
+			return nil, err
+		}
 	}
 	dc := &DeploymentController{
 		client:        client,
@@ -140,7 +142,7 @@ func NewDeploymentController(dInformer extensionsinformers.DeploymentInformer, r
 	dc.dListerSynced = dInformer.Informer().HasSynced
 	dc.rsListerSynced = rsInformer.Informer().HasSynced
 	dc.podListerSynced = podInformer.Informer().HasSynced
-	return dc
+	return dc, nil
 }
 
 // Run begins watching and syncing.
@@ -560,7 +562,7 @@ func (dc *DeploymentController) syncDeployment(key string) error {
 	startTime := time.Now()
 	glog.V(4).Infof("Started syncing deployment %q (%v)", key, startTime)
 	defer func() {
-		glog.V(4).Infof("Finished syncing deployment %q (%v)", key, time.Now().Sub(startTime))
+		glog.V(4).Infof("Finished syncing deployment %q (%v)", key, time.Since(startTime))
 	}()
 
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -578,17 +580,14 @@ func (dc *DeploymentController) syncDeployment(key string) error {
 
 	// Deep-copy otherwise we are mutating our cache.
 	// TODO: Deep-copy only when needed.
-	d, err := util.DeploymentDeepCopy(deployment)
-	if err != nil {
-		return err
-	}
+	d := deployment.DeepCopy()
 
 	everything := metav1.LabelSelector{}
 	if reflect.DeepEqual(d.Spec.Selector, &everything) {
 		dc.eventRecorder.Eventf(d, v1.EventTypeWarning, "SelectingAll", "This deployment is selecting all pods. A non-empty selector is required.")
 		if d.Status.ObservedGeneration < d.Generation {
 			d.Status.ObservedGeneration = d.Generation
-			dc.client.Extensions().Deployments(d.Namespace).UpdateStatus(d)
+			dc.client.ExtensionsV1beta1().Deployments(d.Namespace).UpdateStatus(d)
 		}
 		return nil
 	}
@@ -619,14 +618,6 @@ func (dc *DeploymentController) syncDeployment(key string) error {
 	if err = dc.checkPausedConditions(d); err != nil {
 		return err
 	}
-
-	_, err = dc.hasFailed(d, rsList, podMap)
-	if err != nil {
-		return err
-	}
-	// TODO: Automatically rollback here if we failed above. Locate the last complete
-	// revision and populate the rollback spec with it.
-	// See https://github.com/kubernetes/kubernetes/issues/23211.
 
 	if d.Spec.Paused {
 		return dc.sync(d, rsList, podMap)

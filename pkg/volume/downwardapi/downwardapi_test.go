@@ -54,7 +54,7 @@ func TestCanSupport(t *testing.T) {
 	pluginMgr := volume.VolumePluginMgr{}
 	tmpDir, host := newTestHost(t, nil)
 	defer os.RemoveAll(tmpDir)
-	pluginMgr.InitPlugins(ProbeVolumePlugins(), host)
+	pluginMgr.InitPlugins(ProbeVolumePlugins(), nil /* prober */, host)
 
 	plugin, err := pluginMgr.FindPluginByName(downwardAPIPluginName)
 	if err != nil {
@@ -62,6 +62,12 @@ func TestCanSupport(t *testing.T) {
 	}
 	if plugin.GetPluginName() != downwardAPIPluginName {
 		t.Errorf("Wrong name: %s", plugin.GetPluginName())
+	}
+	if !plugin.CanSupport(&volume.Spec{Volume: &v1.Volume{VolumeSource: v1.VolumeSource{DownwardAPI: &v1.DownwardAPIVolumeSource{}}}}) {
+		t.Errorf("Expected true")
+	}
+	if plugin.CanSupport(&volume.Spec{Volume: &v1.Volume{VolumeSource: v1.VolumeSource{}}}) {
+		t.Errorf("Expected false")
 	}
 }
 
@@ -219,7 +225,7 @@ func newDownwardAPITest(t *testing.T, name string, volumeFiles, podLabels, podAn
 
 	pluginMgr := volume.VolumePluginMgr{}
 	rootDir, host := newTestHost(t, clientset)
-	pluginMgr.InitPlugins(ProbeVolumePlugins(), host)
+	pluginMgr.InitPlugins(ProbeVolumePlugins(), nil /* prober */, host)
 	plugin, err := pluginMgr.FindPluginByName(downwardAPIPluginName)
 	if err != nil {
 		t.Errorf("Can't find the plugin by name")
@@ -287,7 +293,7 @@ func (test *downwardAPITest) tearDown() {
 	if _, err := os.Stat(test.volumePath); err == nil {
 		test.t.Errorf("TearDown() failed, volume path still exists: %s", test.volumePath)
 	} else if !os.IsNotExist(err) {
-		test.t.Errorf("SetUp() failed: %v", err)
+		test.t.Errorf("TearDown() failed: %v", err)
 	}
 	os.RemoveAll(test.rootDir)
 }

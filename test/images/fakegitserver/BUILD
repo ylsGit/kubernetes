@@ -8,12 +8,14 @@ load(
 
 go_binary(
     name = "fakegitserver",
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/test/images/fakegitserver",
 )
 
 go_library(
     name = "go_default_library",
     srcs = ["gitserver.go"],
+    importpath = "k8s.io/kubernetes/test/images/fakegitserver",
 )
 
 filegroup(

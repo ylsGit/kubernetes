@@ -29,20 +29,10 @@ import (
 	"k8s.io/gengo/namer"
 	"k8s.io/gengo/types"
 
-	"reflect"
-
 	"github.com/golang/glog"
-)
 
-// CustomArgs is used by the gengo framework to pass args specific to this generator.
-type CustomArgs struct {
-	ExtraPeerDirs []string // Always consider these as last-ditch possibilities for conversions.
-	// Skipunsafe indicates whether to generate unsafe conversions to improve the efficiency
-	// of these operations. The unsafe operation is a direct pointer assignment via unsafe
-	// (within the allowed uses of unsafe) and is equivalent to a proposed Golang change to
-	// allow structs that are identical to be assigned to each other.
-	SkipUnsafe bool
-}
+	conversionargs "k8s.io/code-generator/cmd/conversion-gen/args"
+)
 
 // These are the comment tags that carry parameters for conversion generation.
 const (
@@ -133,6 +123,12 @@ type conversionFuncMap map[conversionPair]*types.Type
 
 // Returns all manually-defined conversion functions in the package.
 func getManualConversionFunctions(context *generator.Context, pkg *types.Package, manualMap conversionFuncMap) {
+	if pkg == nil {
+		glog.Warningf("Skipping nil package passed to getManualConversionFunctions")
+		return
+	}
+	glog.V(5).Infof("Scanning for conversion functions in %v", pkg.Name)
+
 	scopeName := types.Ref(conversionPackagePath, "Scope").Name
 	errorName := types.Ref("", "error").Name
 	buffer := &bytes.Buffer{}
@@ -147,22 +143,27 @@ func getManualConversionFunctions(context *generator.Context, pkg *types.Package
 			glog.Errorf("Function without signature: %#v", f)
 			continue
 		}
+		glog.V(8).Infof("Considering function %s", f.Name)
 		signature := f.Underlying.Signature
 		// Check whether the function is conversion function.
 		// Note that all of them have signature:
 		// func Convert_inType_To_outType(inType, outType, conversion.Scope) error
 		if signature.Receiver != nil {
+			glog.V(8).Infof("%s has a receiver", f.Name)
 			continue
 		}
 		if len(signature.Parameters) != 3 || signature.Parameters[2].Name != scopeName {
+			glog.V(8).Infof("%s has wrong parameters", f.Name)
 			continue
 		}
 		if len(signature.Results) != 1 || signature.Results[0].Name != errorName {
+			glog.V(8).Infof("%s has wrong results", f.Name)
 			continue
 		}
 		inType := signature.Parameters[0]
 		outType := signature.Parameters[1]
 		if inType.Kind != types.Pointer || outType.Kind != types.Pointer {
+			glog.V(8).Infof("%s has wrong parameter types", f.Name)
 			continue
 		}
 		// Now check if the name satisfies the convention.
@@ -170,12 +171,15 @@ func getManualConversionFunctions(context *generator.Context, pkg *types.Package
 		args := argsFromType(inType.Elem, outType.Elem)
 		sw.Do("Convert_$.inType|public$_To_$.outType|public$", args)
 		if f.Name.Name == buffer.String() {
+			glog.V(4).Infof("Found conversion function %s", f.Name)
 			key := conversionPair{inType.Elem, outType.Elem}
 			// We might scan the same package twice, and that's OK.
 			if v, ok := manualMap[key]; ok && v != nil && v.Name.Package != pkg.Path {
 				panic(fmt.Sprintf("duplicate static conversion defined: %s -> %s", key.inType, key.outType))
 			}
 			manualMap[key] = f
+		} else {
+			glog.V(8).Infof("%s has wrong name", f.Name)
 		}
 		buffer.Reset()
 	}
@@ -238,10 +242,9 @@ func Packages(context *generator.Context, arguments *args.GeneratorArgs) generat
 			continue
 		}
 		skipUnsafe := false
-		if customArgs, ok := arguments.CustomArgs.(*CustomArgs); ok {
-			if len(customArgs.ExtraPeerDirs) > 0 {
-				peerPkgs = append(peerPkgs, customArgs.ExtraPeerDirs...)
-			}
+		if customArgs, ok := arguments.CustomArgs.(*conversionargs.CustomArgs); ok {
+			peerPkgs = append(peerPkgs, customArgs.BasePeerDirs...)
+			peerPkgs = append(peerPkgs, customArgs.ExtraPeerDirs...)
 			skipUnsafe = customArgs.SkipUnsafe
 		}
 
@@ -254,7 +257,7 @@ func Packages(context *generator.Context, arguments *args.GeneratorArgs) generat
 			externalTypes := externalTypesValues[0]
 			glog.V(5).Infof("  external types tags: %q", externalTypes)
 			var err error
-			typesPkg, err = context.AddDirectory(filepath.Join(pkg.Path, externalTypes))
+			typesPkg, err = context.AddDirectory(externalTypes)
 			if err != nil {
 				glog.Fatalf("cannot import package %s", externalTypes)
 			}
@@ -276,10 +279,6 @@ func Packages(context *generator.Context, arguments *args.GeneratorArgs) generat
 			}
 			return pkg
 		}
-		fqPkgPath := pkg.Path
-		if strings.Contains(pkg.SourcePath, "/vendor/") {
-			fqPkgPath = filepath.Join("k8s.io", "kubernetes", "vendor", pkg.Path)
-		}
 		for i := range peerPkgs {
 			peerPkgs[i] = vendorless(peerPkgs[i])
 		}
@@ -287,7 +286,11 @@ func Packages(context *generator.Context, arguments *args.GeneratorArgs) generat
 		// Make sure our peer-packages are added and fully parsed.
 		for _, pp := range peerPkgs {
 			context.AddDir(pp)
-			getManualConversionFunctions(context, context.Universe[pp], manualConversions)
+			p := context.Universe[pp]
+			if nil == p {
+				glog.Fatalf("failed to find pkg: %s", pp)
+			}
+			getManualConversionFunctions(context, p, manualConversions)
 		}
 
 		unsafeEquality := TypesEqual(memoryEquivalentTypes)
@@ -295,10 +298,24 @@ func Packages(context *generator.Context, arguments *args.GeneratorArgs) generat
 			unsafeEquality = noEquality{}
 		}
 
+		path := pkg.Path
+		// if the source path is within a /vendor/ directory (for example,
+		// k8s.io/kubernetes/vendor/k8s.io/apimachinery/pkg/apis/meta/v1), allow
+		// generation to output to the proper relative path (under vendor).
+		// Otherwise, the generator will create the file in the wrong location
+		// in the output directory.
+		// TODO: build a more fundamental concept in gengo for dealing with modifications
+		// to vendored packages.
+		if strings.HasPrefix(pkg.SourcePath, arguments.OutputBase) {
+			expandedPath := strings.TrimPrefix(pkg.SourcePath, arguments.OutputBase)
+			if strings.Contains(expandedPath, "/vendor/") {
+				path = expandedPath
+			}
+		}
 		packages = append(packages,
 			&generator.DefaultPackage{
 				PackageName: filepath.Base(pkg.Path),
-				PackagePath: fqPkgPath,
+				PackagePath: path,
 				HeaderText:  header,
 				GeneratorFunc: func(c *generator.Context) (generators []generator.Generator) {
 					return []generator.Generator{
@@ -554,12 +571,6 @@ func argsFromType(inType, outType *types.Type) generator.Args {
 	}
 }
 
-func defaultingArgsFromType(inType *types.Type) generator.Args {
-	return generator.Args{
-		"inType": inType,
-	}
-}
-
 const nameTmpl = "Convert_$.inType|publicIT$_To_$.outType|publicIT$"
 
 func (g *genConversion) preexists(inType, outType *types.Type) (*types.Type, bool) {
@@ -782,15 +793,6 @@ func (g *genConversion) doStruct(inType, outType *types.Type, sw *generator.Snip
 			outMemberType = &copied
 		}
 
-		// Determine if our destination field is a slice that should be output when empty.
-		// If it is, ensure a nil source slice converts to a zero-length destination slice.
-		// See http://issue.k8s.io/43203
-		persistEmptySlice := false
-		if outMemberType.Kind == types.Slice {
-			jsonTag := reflect.StructTag(outMember.Tags).Get("json")
-			persistEmptySlice = len(jsonTag) > 0 && !strings.Contains(jsonTag, ",omitempty")
-		}
-
 		args := argsFromType(inMemberType, outMemberType).With("name", inMember.Name)
 
 		// try a direct memory copy for any type that has exactly equivalent values
@@ -806,15 +808,7 @@ func (g *genConversion) doStruct(inType, outType *types.Type, sw *generator.Snip
 				sw.Do("out.$.name$ = *(*$.outType|raw$)($.Pointer|raw$(&in.$.name$))\n", args)
 				continue
 			case types.Slice:
-				if persistEmptySlice {
-					sw.Do("if in.$.name$ == nil {\n", args)
-					sw.Do("out.$.name$ = make($.outType|raw$, 0)\n", args)
-					sw.Do("} else {\n", nil)
-					sw.Do("out.$.name$ = *(*$.outType|raw$)($.Pointer|raw$(&in.$.name$))\n", args)
-					sw.Do("}\n", nil)
-				} else {
-					sw.Do("out.$.name$ = *(*$.outType|raw$)($.Pointer|raw$(&in.$.name$))\n", args)
-				}
+				sw.Do("out.$.name$ = *(*$.outType|raw$)($.Pointer|raw$(&in.$.name$))\n", args)
 				continue
 			}
 		}
@@ -864,11 +858,7 @@ func (g *genConversion) doStruct(inType, outType *types.Type, sw *generator.Snip
 			sw.Do("in, out := &in.$.name$, &out.$.name$\n", args)
 			g.generateFor(inMemberType, outMemberType, sw)
 			sw.Do("} else {\n", nil)
-			if persistEmptySlice {
-				sw.Do("out.$.name$ = make($.outType|raw$, 0)\n", args)
-			} else {
-				sw.Do("out.$.name$ = nil\n", args)
-			}
+			sw.Do("out.$.name$ = nil\n", args)
 			sw.Do("}\n", nil)
 		case types.Struct:
 			if g.isDirectlyAssignable(inMemberType, outMemberType) {

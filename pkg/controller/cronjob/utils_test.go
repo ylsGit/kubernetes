@@ -22,7 +22,7 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	batchv2alpha1 "k8s.io/api/batch/v2alpha1"
+	batchv1beta1 "k8s.io/api/batch/v1beta1"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,17 +37,17 @@ func TestGetJobFromTemplate(t *testing.T) {
 	var one int64 = 1
 	var no bool = false
 
-	sj := batchv2alpha1.CronJob{
+	sj := batchv1beta1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "mycronjob",
 			Namespace: "snazzycats",
 			UID:       types.UID("1a2b3c"),
 			SelfLink:  "/apis/batch/v1/namespaces/snazzycats/jobs/mycronjob",
 		},
-		Spec: batchv2alpha1.CronJobSpec{
+		Spec: batchv1beta1.CronJobSpec{
 			Schedule:          "* * * * ?",
-			ConcurrencyPolicy: batchv2alpha1.AllowConcurrent,
-			JobTemplate: batchv2alpha1.JobTemplateSpec{
+			ConcurrencyPolicy: batchv1beta1.AllowConcurrent,
+			JobTemplate: batchv1beta1.JobTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      map[string]string{"a": "b"},
 					Annotations: map[string]string{"x": "y"},
@@ -83,20 +83,8 @@ func TestGetJobFromTemplate(t *testing.T) {
 	if len(job.ObjectMeta.Labels) != 1 {
 		t.Errorf("Wrong number of labels")
 	}
-	if len(job.ObjectMeta.Annotations) != 2 {
+	if len(job.ObjectMeta.Annotations) != 1 {
 		t.Errorf("Wrong number of annotations")
-	}
-	v, ok := job.ObjectMeta.Annotations[v1.CreatedByAnnotation]
-	if !ok {
-		t.Errorf("Missing created-by annotation")
-	}
-	expectedCreatedBy := `{"kind":"SerializedReference","apiVersion":"v1","reference":{"kind":"CronJob","namespace":"snazzycats","name":"mycronjob","uid":"1a2b3c","apiVersion":"batch"}}
-`
-	if len(v) != len(expectedCreatedBy) {
-		t.Errorf("Wrong length for created-by annotation, expected %v got %v", len(expectedCreatedBy), len(v))
-	}
-	if v != expectedCreatedBy {
-		t.Errorf("Wrong value for created-by annotation, expected %v got %v", expectedCreatedBy, v)
 	}
 }
 
@@ -267,16 +255,16 @@ func TestGetRecentUnmetScheduleTimes(t *testing.T) {
 		t.Errorf("test setup error: %v", err)
 	}
 
-	sj := batchv2alpha1.CronJob{
+	sj := batchv1beta1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "mycronjob",
 			Namespace: metav1.NamespaceDefault,
 			UID:       types.UID("1a2b3c"),
 		},
-		Spec: batchv2alpha1.CronJobSpec{
+		Spec: batchv1beta1.CronJobSpec{
 			Schedule:          schedule,
-			ConcurrencyPolicy: batchv2alpha1.AllowConcurrent,
-			JobTemplate:       batchv2alpha1.JobTemplateSpec{},
+			ConcurrencyPolicy: batchv1beta1.AllowConcurrent,
+			JobTemplate:       batchv1beta1.JobTemplateSpec{},
 		},
 	}
 	{

@@ -8,7 +8,6 @@ load(
 go_library(
     name = "go_default_library",
     srcs = [
-        "conversion.go",
         "defaults.go",
         "doc.go",
         "helpers.go",
@@ -16,6 +15,7 @@ go_library(
         "zz_generated.conversion.go",
         "zz_generated.defaults.go",
     ],
+    importpath = "k8s.io/kubernetes/pkg/apis/certificates/v1beta1",
     deps = [
         "//pkg/apis/certificates:go_default_library",
         "//vendor/k8s.io/api/certificates/v1beta1:go_default_library",

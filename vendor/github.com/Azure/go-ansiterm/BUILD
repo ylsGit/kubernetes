@@ -18,8 +18,9 @@ go_library(
         "states.go",
         "utilities.go",
     ],
+    importpath = "github.com/Azure/go-ansiterm",
     visibility = ["//visibility:public"],
-    deps = ["//vendor/github.com/Sirupsen/logrus:go_default_library"],
+    deps = ["//vendor/github.com/sirupsen/logrus:go_default_library"],
 )
 
 filegroup(

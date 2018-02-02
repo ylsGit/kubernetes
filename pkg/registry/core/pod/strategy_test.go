@@ -29,8 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	apitesting "k8s.io/kubernetes/pkg/api/testing"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/kubelet/client"
 
 	// install all api groups for testing
@@ -69,6 +70,20 @@ func TestMatchPod(t *testing.T) {
 				Spec: api.PodSpec{RestartPolicy: api.RestartPolicyAlways},
 			},
 			fieldSelector: fields.ParseSelectorOrDie("spec.restartPolicy=Never"),
+			expectMatch:   false,
+		},
+		{
+			in: &api.Pod{
+				Spec: api.PodSpec{SchedulerName: "scheduler1"},
+			},
+			fieldSelector: fields.ParseSelectorOrDie("spec.schedulerName=scheduler1"),
+			expectMatch:   true,
+		},
+		{
+			in: &api.Pod{
+				Spec: api.PodSpec{SchedulerName: "scheduler1"},
+			},
+			fieldSelector: fields.ParseSelectorOrDie("spec.schedulerName=scheduler2"),
 			expectMatch:   false,
 		},
 		{
@@ -121,11 +136,6 @@ func getResourceList(cpu, memory string) api.ResourceList {
 		res[api.ResourceMemory] = resource.MustParse(memory)
 	}
 	return res
-}
-
-func addResource(rName, value string, rl api.ResourceList) api.ResourceList {
-	rl[api.ResourceName(rName)] = resource.MustParse(value)
-	return rl
 }
 
 func getResourceRequirements(requests, limits api.ResourceList) api.ResourceRequirements {
@@ -347,7 +357,7 @@ func TestCheckLogLocation(t *testing.T) {
 
 func TestSelectableFieldLabelConversions(t *testing.T) {
 	apitesting.TestSelectableFieldLabelConversionsOfKind(t,
-		api.Registry.GroupOrDie(api.GroupName).GroupVersion.String(),
+		legacyscheme.Registry.GroupOrDie(api.GroupName).GroupVersion.String(),
 		"Pod",
 		PodToSelectableFields(&api.Pod{}),
 		nil,

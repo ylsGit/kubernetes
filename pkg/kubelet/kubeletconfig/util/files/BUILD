@@ -8,7 +8,8 @@ load(
 go_library(
     name = "go_default_library",
     srcs = ["files.go"],
-    deps = ["//pkg/kubelet/kubeletconfig/util/filesystem:go_default_library"],
+    importpath = "k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/files",
+    deps = ["//pkg/util/filesystem:go_default_library"],
 )
 
 filegroup(

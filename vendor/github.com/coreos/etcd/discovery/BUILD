@@ -2,10 +2,8 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "go_default_library",
-    srcs = [
-        "discovery.go",
-        "srv.go",
-    ],
+    srcs = ["discovery.go"],
+    importpath = "github.com/coreos/etcd/discovery",
     visibility = ["//visibility:public"],
     deps = [
         "//vendor/github.com/coreos/etcd/client:go_default_library",

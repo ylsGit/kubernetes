@@ -27,20 +27,23 @@ import (
 	"k8s.io/apimachinery/pkg/util/diff"
 	apiserveroptions "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/apiserver/pkg/storage/storagebackend"
-	utilconfig "k8s.io/apiserver/pkg/util/flag"
-	kapi "k8s.io/kubernetes/pkg/api"
+	utilflag "k8s.io/apiserver/pkg/util/flag"
+	auditwebhook "k8s.io/apiserver/plugin/pkg/audit/webhook"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	kapi "k8s.io/kubernetes/pkg/apis/core"
 	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
+	"k8s.io/kubernetes/pkg/master/reconcilers"
 )
 
-func TestAddFlagsFlag(t *testing.T) {
-	// TODO: Expand the test to include other flags as well.
+func TestAddFlags(t *testing.T) {
 	f := pflag.NewFlagSet("addflagstest", pflag.ContinueOnError)
 	s := NewServerRunOptions()
 	s.AddFlags(f)
 
 	args := []string{
-		"--admission-control=AlwaysDeny",
+		"--enable-admission-plugins=AlwaysDeny",
 		"--admission-control-config-file=/admission-control-config",
 		"--advertise-address=192.168.10.10",
 		"--allow-privileged=false",
@@ -53,6 +56,12 @@ func TestAddFlagsFlag(t *testing.T) {
 		"--audit-policy-file=/policy",
 		"--audit-webhook-config-file=/webhook-config",
 		"--audit-webhook-mode=blocking",
+		"--audit-webhook-batch-buffer-size=42",
+		"--audit-webhook-batch-max-size=43",
+		"--audit-webhook-batch-max-wait=1s",
+		"--audit-webhook-batch-throttle-qps=43.5",
+		"--audit-webhook-batch-throttle-burst=44",
+		"--audit-webhook-batch-initial-backoff=2s",
 		"--authentication-token-webhook-cache-ttl=3m",
 		"--authentication-token-webhook-config-file=/token-webhook-config",
 		"--authorization-mode=AlwaysDeny",
@@ -65,35 +74,62 @@ func TestAddFlagsFlag(t *testing.T) {
 		"--cloud-config=/cloud-config",
 		"--cloud-provider=azure",
 		"--cors-allowed-origins=10.10.10.100,10.10.10.200",
+		"--contention-profiling=true",
 		"--enable-aggregator-routing=true",
 		"--enable-logs-handler=false",
 		"--enable-swagger-ui=true",
+		"--endpoint-reconciler-type=" + string(reconcilers.MasterCountReconcilerType),
+		"--etcd-quorum-read=false",
+		"--etcd-keyfile=/var/run/kubernetes/etcd.key",
+		"--etcd-certfile=/var/run/kubernetes/etcdce.crt",
+		"--etcd-cafile=/var/run/kubernetes/etcdca.crt",
+		"--kubelet-https=true",
+		"--kubelet-read-only-port=10255",
+		"--kubelet-timeout=5s",
+		"--kubelet-client-certificate=/var/run/kubernetes/ceserver.crt",
+		"--kubelet-client-key=/var/run/kubernetes/server.key",
+		"--kubelet-certificate-authority=/var/run/kubernetes/caserver.crt",
+		"--proxy-client-cert-file=/var/run/kubernetes/proxy.crt",
+		"--proxy-client-key-file=/var/run/kubernetes/proxy.key",
+		"--request-timeout=2m",
+		"--storage-backend=etcd2",
 	}
 	f.Parse(args)
 
 	// This is a snapshot of expected options parsed by args.
 	expected := &ServerRunOptions{
-		ServiceNodePortRange: DefaultServiceNodePortRange,
-		MasterCount:          5,
-		AllowPrivileged:      false,
+		ServiceNodePortRange:   kubeoptions.DefaultServiceNodePortRange,
+		MasterCount:            5,
+		EndpointReconcilerType: string(reconcilers.MasterCountReconcilerType),
+		AllowPrivileged:        false,
 		GenericServerRunOptions: &apiserveroptions.ServerRunOptions{
 			AdvertiseAddress:            net.ParseIP("192.168.10.10"),
 			CorsAllowedOriginList:       []string{"10.10.10.100", "10.10.10.200"},
 			MaxRequestsInFlight:         400,
 			MaxMutatingRequestsInFlight: 200,
+			RequestTimeout:              time.Duration(2) * time.Minute,
 			MinRequestTimeout:           1800,
 		},
-		Admission: &apiserveroptions.AdmissionOptions{
-			PluginNames: []string{"AlwaysDeny"},
-			ConfigFile:  "/admission-control-config",
-			Plugins:     s.Admission.Plugins,
+		Admission: &kubeoptions.AdmissionOptions{
+			GenericAdmission: &apiserveroptions.AdmissionOptions{
+				RecommendedPluginOrder: s.Admission.GenericAdmission.RecommendedPluginOrder,
+				DefaultOffPlugins:      s.Admission.GenericAdmission.DefaultOffPlugins,
+				EnablePlugins:          []string{"AlwaysDeny"},
+				ConfigFile:             "/admission-control-config",
+				Plugins:                s.Admission.GenericAdmission.Plugins,
+			},
 		},
 		Etcd: &apiserveroptions.EtcdOptions{
 			StorageConfig: storagebackend.Config{
+				Type:       "etcd2",
 				ServerList: nil,
 				Prefix:     "/registry",
 				DeserializationCacheSize: 0,
-				Copier: kapi.Scheme,
+				Quorum:             false,
+				KeyFile:            "/var/run/kubernetes/etcd.key",
+				CAFile:             "/var/run/kubernetes/etcdca.crt",
+				CertFile:           "/var/run/kubernetes/etcdce.crt",
+				CompactionInterval: storagebackend.DefaultCompactInterval,
 			},
 			DefaultStorageMediaType: "application/vnd.kubernetes.protobuf",
 			DeleteCollectionWorkers: 1,
@@ -126,6 +162,11 @@ func TestAddFlagsFlag(t *testing.T) {
 			},
 			EnableHttps: true,
 			HTTPTimeout: time.Duration(5) * time.Second,
+			TLSClientConfig: restclient.TLSClientConfig{
+				CertFile: "/var/run/kubernetes/ceserver.crt",
+				KeyFile:  "/var/run/kubernetes/server.key",
+				CAFile:   "/var/run/kubernetes/caserver.crt",
+			},
 		},
 		Audit: &apiserveroptions.AuditOptions{
 			LogOptions: apiserveroptions.AuditLogOptions{
@@ -133,17 +174,26 @@ func TestAddFlagsFlag(t *testing.T) {
 				MaxAge:     11,
 				MaxBackups: 12,
 				MaxSize:    13,
-				Format:     "legacy",
+				Format:     "json",
 			},
 			WebhookOptions: apiserveroptions.AuditWebhookOptions{
 				Mode:       "blocking",
 				ConfigFile: "/webhook-config",
+				BatchConfig: auditwebhook.BatchBackendConfig{
+					BufferSize:     42,
+					MaxBatchSize:   43,
+					MaxBatchWait:   1 * time.Second,
+					ThrottleQPS:    43.5,
+					ThrottleBurst:  44,
+					InitialBackoff: 2 * time.Second,
+				},
 			},
 			PolicyFile: "/policy",
 		},
 		Features: &apiserveroptions.FeatureOptions{
-			EnableSwaggerUI: true,
-			EnableProfiling: true,
+			EnableSwaggerUI:           true,
+			EnableProfiling:           true,
+			EnableContentionProfiling: true,
 		},
 		Authentication: &kubeoptions.BuiltInAuthenticationOptions{
 			Anonymous: &kubeoptions.AnonymousAuthenticationOptions{
@@ -182,14 +232,16 @@ func TestAddFlagsFlag(t *testing.T) {
 			CloudProvider:   "azure",
 		},
 		StorageSerialization: &kubeoptions.StorageSerializationOptions{
-			StorageVersions:        kapi.Registry.AllPreferredGroupVersions(),
-			DefaultStorageVersions: kapi.Registry.AllPreferredGroupVersions(),
+			StorageVersions:        legacyscheme.Registry.AllPreferredGroupVersions(),
+			DefaultStorageVersions: legacyscheme.Registry.AllPreferredGroupVersions(),
 		},
-		APIEnablement: &kubeoptions.APIEnablementOptions{
-			RuntimeConfig: utilconfig.ConfigurationMap{},
+		APIEnablement: &apiserveroptions.APIEnablementOptions{
+			RuntimeConfig: utilflag.ConfigurationMap{},
 		},
 		EnableLogsHandler:       false,
 		EnableAggregatorRouting: true,
+		ProxyClientKeyFile:      "/var/run/kubernetes/proxy.key",
+		ProxyClientCertFile:     "/var/run/kubernetes/proxy.crt",
 	}
 
 	if !reflect.DeepEqual(expected, s) {

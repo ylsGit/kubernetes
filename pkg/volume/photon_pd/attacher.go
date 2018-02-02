@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/photon"
 	"k8s.io/kubernetes/pkg/util/mount"
@@ -121,7 +122,7 @@ func (attacher *photonPersistentDiskAttacher) VolumesAreAttached(specs []*volume
 	return volumesAttachedCheck, nil
 }
 
-func (attacher *photonPersistentDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath string, timeout time.Duration) (string, error) {
+func (attacher *photonPersistentDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath string, _ *v1.Pod, timeout time.Duration) (string, error) {
 	volumeSource, _, err := getVolumeSource(spec)
 	if err != nil {
 		glog.Errorf("Photon Controller attacher: WaitForAttach failed to get volume source")
@@ -242,10 +243,10 @@ func (plugin *photonPersistentDiskPlugin) NewDetacher() (volume.Detacher, error)
 }
 
 // Detach the given device from the given host.
-func (detacher *photonPersistentDiskDetacher) Detach(deviceMountPath string, nodeName types.NodeName) error {
+func (detacher *photonPersistentDiskDetacher) Detach(volumeName string, nodeName types.NodeName) error {
 
 	hostName := string(nodeName)
-	pdID := deviceMountPath
+	pdID := volumeName
 	attached, err := detacher.photonDisks.DiskIsAttached(pdID, nodeName)
 	if err != nil {
 		// Log error and continue with detach

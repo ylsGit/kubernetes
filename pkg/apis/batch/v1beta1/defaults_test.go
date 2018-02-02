@@ -23,10 +23,10 @@ import (
 	batchv1beta1 "k8s.io/api/batch/v1beta1"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/kubernetes/pkg/api"
-	_ "k8s.io/kubernetes/pkg/api/install"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	_ "k8s.io/kubernetes/pkg/apis/batch/install"
 	. "k8s.io/kubernetes/pkg/apis/batch/v1beta1"
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
 )
 
 func TestSetDefaultCronJob(t *testing.T) {
@@ -34,26 +34,32 @@ func TestSetDefaultCronJob(t *testing.T) {
 		original *batchv1beta1.CronJob
 		expected *batchv1beta1.CronJob
 	}{
-		"empty batchv2alpha1.CronJob should default batchv2alpha1.ConcurrencyPolicy and Suspend": {
+		"empty batchv1beta1.CronJob should default batchv1beta1.ConcurrencyPolicy and Suspend": {
 			original: &batchv1beta1.CronJob{},
 			expected: &batchv1beta1.CronJob{
 				Spec: batchv1beta1.CronJobSpec{
-					ConcurrencyPolicy: batchv1beta1.AllowConcurrent,
-					Suspend:           newBool(false),
+					ConcurrencyPolicy:          batchv1beta1.AllowConcurrent,
+					Suspend:                    newBool(false),
+					SuccessfulJobsHistoryLimit: newInt32(3),
+					FailedJobsHistoryLimit:     newInt32(1),
 				},
 			},
 		},
 		"set fields should not be defaulted": {
 			original: &batchv1beta1.CronJob{
 				Spec: batchv1beta1.CronJobSpec{
-					ConcurrencyPolicy: batchv1beta1.ForbidConcurrent,
-					Suspend:           newBool(true),
+					ConcurrencyPolicy:          batchv1beta1.ForbidConcurrent,
+					Suspend:                    newBool(true),
+					SuccessfulJobsHistoryLimit: newInt32(5),
+					FailedJobsHistoryLimit:     newInt32(5),
 				},
 			},
 			expected: &batchv1beta1.CronJob{
 				Spec: batchv1beta1.CronJobSpec{
-					ConcurrencyPolicy: batchv1beta1.ForbidConcurrent,
-					Suspend:           newBool(true),
+					ConcurrencyPolicy:          batchv1beta1.ForbidConcurrent,
+					Suspend:                    newBool(true),
+					SuccessfulJobsHistoryLimit: newInt32(5),
+					FailedJobsHistoryLimit:     newInt32(5),
 				},
 			},
 		},
@@ -74,22 +80,28 @@ func TestSetDefaultCronJob(t *testing.T) {
 		if *actual.Spec.Suspend != *expected.Spec.Suspend {
 			t.Errorf("%s: got different suspend than expected: %v %v", name, *actual.Spec.Suspend, *expected.Spec.Suspend)
 		}
+		if *actual.Spec.SuccessfulJobsHistoryLimit != *expected.Spec.SuccessfulJobsHistoryLimit {
+			t.Errorf("%s: got different successfulJobsHistoryLimit than expected: %v %v", name, *actual.Spec.SuccessfulJobsHistoryLimit, *expected.Spec.SuccessfulJobsHistoryLimit)
+		}
+		if *actual.Spec.FailedJobsHistoryLimit != *expected.Spec.FailedJobsHistoryLimit {
+			t.Errorf("%s: got different failedJobsHistoryLimit than expected: %v %v", name, *actual.Spec.FailedJobsHistoryLimit, *expected.Spec.FailedJobsHistoryLimit)
+		}
 	}
 }
 
 func roundTrip(t *testing.T, obj runtime.Object) runtime.Object {
-	data, err := runtime.Encode(api.Codecs.LegacyCodec(SchemeGroupVersion), obj)
+	data, err := runtime.Encode(legacyscheme.Codecs.LegacyCodec(SchemeGroupVersion), obj)
 	if err != nil {
 		t.Errorf("%v\n %#v", err, obj)
 		return nil
 	}
-	obj2, err := runtime.Decode(api.Codecs.UniversalDecoder(), data)
+	obj2, err := runtime.Decode(legacyscheme.Codecs.UniversalDecoder(), data)
 	if err != nil {
 		t.Errorf("%v\nData: %s\nSource: %#v", err, string(data), obj)
 		return nil
 	}
 	obj3 := reflect.New(reflect.TypeOf(obj).Elem()).Interface().(runtime.Object)
-	err = api.Scheme.Convert(obj2, obj3, nil)
+	err = legacyscheme.Scheme.Convert(obj2, obj3, nil)
 	if err != nil {
 		t.Errorf("%v\nSource: %#v", err, obj2)
 		return nil
@@ -99,6 +111,12 @@ func roundTrip(t *testing.T, obj runtime.Object) runtime.Object {
 
 func newBool(val bool) *bool {
 	p := new(bool)
+	*p = val
+	return p
+}
+
+func newInt32(val int32) *int32 {
+	p := new(int32)
 	*p = val
 	return p
 }

@@ -9,18 +9,21 @@ load(
 
 go_binary(
     name = "teststale",
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/hack/cmd/teststale",
 )
 
 go_test(
     name = "go_default_test",
     srcs = ["teststale_test.go"],
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/hack/cmd/teststale",
 )
 
 go_library(
     name = "go_default_library",
     srcs = ["teststale.go"],
+    importpath = "k8s.io/kubernetes/hack/cmd/teststale",
     deps = ["//vendor/github.com/golang/glog:go_default_library"],
 )
 

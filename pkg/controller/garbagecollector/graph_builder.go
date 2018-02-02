@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/kubernetes/pkg/controller/garbagecollector/metaonly"
 )
 
 type eventType int
@@ -78,19 +79,21 @@ type GraphBuilder struct {
 	// dependencyGraphBuilder
 	monitors    monitors
 	monitorLock sync.Mutex
-	// stopCh drives shutdown. If it is nil, it indicates that Run() has not been
-	// called yet. If it is non-nil, then when closed it indicates everything
-	// should shut down.
-	//
+	// informersStarted is closed after after all of the controllers have been initialized and are running.
+	// After that it is safe to start them here, before that it is not.
+	informersStarted <-chan struct{}
+
+	// stopCh drives shutdown. When a receive from it unblocks, monitors will shut down.
 	// This channel is also protected by monitorLock.
 	stopCh <-chan struct{}
+
+	// running tracks whether Run() has been called.
+	// it is protected by monitorLock.
+	running bool
 
 	// metaOnlyClientPool uses a special codec, which removes fields except for
 	// apiVersion, kind, and metadata during decoding.
 	metaOnlyClientPool dynamic.ClientPool
-	// used to register exactly once the rate limiters of the clients used by
-	// the `monitors`.
-	registeredRateLimiterForControllers *RegisteredRateLimiter
 	// monitors are the producer of the graphChanges queue, graphBuilder alters
 	// the in-memory graph according to the changes.
 	graphChanges workqueue.RateLimitingInterface
@@ -200,8 +203,6 @@ func (gb *GraphBuilder) controllerFor(resource schema.GroupVersionResource, kind
 	if err != nil {
 		return nil, err
 	}
-	// TODO: since the gv is never unregistered, isn't this a memory leak?
-	gb.registeredRateLimiterForControllers.registerIfNotPresent(resource.GroupVersion(), client, "garbage_collector_monitoring")
 	_, monitor := cache.NewInformer(
 		listWatcher(client, resource),
 		nil,
@@ -231,7 +232,7 @@ func (gb *GraphBuilder) syncMonitors(resources map[schema.GroupVersionResource]s
 	kept := 0
 	added := 0
 	for resource := range resources {
-		if _, ok := ignoredResources[resource.GroupResource()]; ok {
+		if _, ok := gb.ignoredResources[resource.GroupResource()]; ok {
 			continue
 		}
 		if m, ok := toRemove[resource]; ok {
@@ -275,9 +276,13 @@ func (gb *GraphBuilder) startMonitors() {
 	gb.monitorLock.Lock()
 	defer gb.monitorLock.Unlock()
 
-	if gb.stopCh == nil {
+	if !gb.running {
 		return
 	}
+
+	// we're waiting until after the informer start that happens once all the controllers are initialized.  This ensures
+	// that they don't get unexpected events on their work queues.
+	<-gb.informersStarted
 
 	monitors := gb.monitors
 	started := 0
@@ -321,6 +326,7 @@ func (gb *GraphBuilder) Run(stopCh <-chan struct{}) {
 	// Set up the stop channel.
 	gb.monitorLock.Lock()
 	gb.stopCh = stopCh
+	gb.running = true
 	gb.monitorLock.Unlock()
 
 	// Start monitors and begin change processing until the stop channel is
@@ -339,6 +345,9 @@ func (gb *GraphBuilder) Run(stopCh <-chan struct{}) {
 			close(monitor.stopCh)
 		}
 	}
+
+	// reset monitors so that the graph builder can be safely re-run/synced.
+	gb.monitors = nil
 	glog.Infof("stopped %d of %d monitors", stopped, len(monitors))
 }
 
@@ -351,6 +360,7 @@ var ignoredResources = map[schema.GroupResource]struct{}{
 	{Group: "authorization.k8s.io", Resource: "subjectaccessreviews"}:      {},
 	{Group: "authorization.k8s.io", Resource: "selfsubjectaccessreviews"}:  {},
 	{Group: "authorization.k8s.io", Resource: "localsubjectaccessreviews"}: {},
+	{Group: "authorization.k8s.io", Resource: "selfsubjectrulesreviews"}:   {},
 	{Group: "apiregistration.k8s.io", Resource: "apiservices"}:             {},
 	{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}: {},
 }
@@ -362,8 +372,16 @@ func DefaultIgnoredResources() map[schema.GroupResource]struct{} {
 	return ignoredResources
 }
 
-func (gb *GraphBuilder) enqueueChanges(e *event) {
-	gb.graphChanges.Add(e)
+// enqueueVirtualDeleteEvent is used to add a virtual delete event to be processed for virtual nodes
+// once it is determined they do not have backing objects in storage
+func (gb *GraphBuilder) enqueueVirtualDeleteEvent(ref objectReference) {
+	gb.graphChanges.Add(&event{
+		eventType: deleteEvent,
+		obj: &metaonly.MetadataOnlyObject{
+			TypeMeta:   metav1.TypeMeta{APIVersion: ref.APIVersion, Kind: ref.Kind},
+			ObjectMeta: metav1.ObjectMeta{Namespace: ref.Namespace, UID: ref.UID, Name: ref.Name},
+		},
+	})
 }
 
 // addDependentToOwners adds n to owners' dependents list. If the owner does not
@@ -375,22 +393,26 @@ func (gb *GraphBuilder) addDependentToOwners(n *node, owners []metav1.OwnerRefer
 		ownerNode, ok := gb.uidToNode.Read(owner.UID)
 		if !ok {
 			// Create a "virtual" node in the graph for the owner if it doesn't
-			// exist in the graph yet. Then enqueue the virtual node into the
-			// attemptToDelete. The garbage processor will enqueue a virtual delete
-			// event to delete it from the graph if API server confirms this
-			// owner doesn't exist.
+			// exist in the graph yet.
 			ownerNode = &node{
 				identity: objectReference{
 					OwnerReference: owner,
 					Namespace:      n.identity.Namespace,
 				},
 				dependents: make(map[*node]struct{}),
+				virtual:    true,
 			}
 			glog.V(5).Infof("add virtual node.identity: %s\n\n", ownerNode.identity)
 			gb.uidToNode.Write(ownerNode)
-			gb.attemptToDelete.Add(ownerNode)
 		}
 		ownerNode.addDependent(n)
+		if !ok {
+			// Enqueue the virtual node into attemptToDelete.
+			// The garbage processor will enqueue a virtual delete
+			// event to delete it from the graph if API server confirms this
+			// owner doesn't exist.
+			gb.attemptToDelete.Add(ownerNode)
+		}
 	}
 }
 
@@ -581,6 +603,12 @@ func (gb *GraphBuilder) processGraphChanges() bool {
 	glog.V(5).Infof("GraphBuilder process object: %s/%s, namespace %s, name %s, uid %s, event type %v", event.gvk.GroupVersion().String(), event.gvk.Kind, accessor.GetNamespace(), accessor.GetName(), string(accessor.GetUID()), event.eventType)
 	// Check if the node already exsits
 	existingNode, found := gb.uidToNode.Read(accessor.GetUID())
+	if found {
+		// this marks the node as having been observed via an informer event
+		// 1. this depends on graphChanges only containing add/update events from the actual informer
+		// 2. this allows things tracking virtual nodes' existence to stop polling and rely on informer events
+		existingNode.markObserved()
+	}
 	switch {
 	case (event.eventType == addEvent || event.eventType == updateEvent) && !found:
 		newNode := &node{

@@ -13,10 +13,10 @@ go_library(
         "types.go",
         "zz_generated.deepcopy.go",
     ],
+    importpath = "k8s.io/metrics/pkg/apis/metrics",
     deps = [
         "//vendor/k8s.io/apimachinery/pkg/api/resource:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/conversion:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/runtime:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/runtime/schema:go_default_library",
     ],
@@ -35,6 +35,7 @@ filegroup(
         ":package-srcs",
         "//staging/src/k8s.io/metrics/pkg/apis/metrics/install:all-srcs",
         "//staging/src/k8s.io/metrics/pkg/apis/metrics/v1alpha1:all-srcs",
+        "//staging/src/k8s.io/metrics/pkg/apis/metrics/v1beta1:all-srcs",
     ],
     tags = ["automanaged"],
 )

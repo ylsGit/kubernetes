@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -39,6 +39,8 @@ import (
 	fakecertificatesinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/certificates/internalversion/fake"
 	coreinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	fakecoreinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion/fake"
+	eventsinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/events/internalversion"
+	fakeeventsinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/events/internalversion/fake"
 	extensionsinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/extensions/internalversion"
 	fakeextensionsinternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/extensions/internalversion/fake"
 	networkinginternalversion "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/networking/internalversion"
@@ -69,10 +71,17 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 
 	fakePtr := testing.Fake{}
 	fakePtr.AddReactor("*", "*", testing.ObjectReaction(o))
+	fakePtr.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
+		gvr := action.GetResource()
+		ns := action.GetNamespace()
+		watch, err := o.Watch(gvr, ns)
+		if err != nil {
+			return false, nil, err
+		}
+		return true, watch, nil
+	})
 
-	fakePtr.AddWatchReactor("*", testing.DefaultWatchReactor(watch.NewFake(), nil))
-
-	return &Clientset{fakePtr}
+	return &Clientset{fakePtr, &fakediscovery.FakeDiscovery{Fake: &fakePtr}}
 }
 
 // Clientset implements clientset.Interface. Meant to be embedded into a
@@ -80,10 +89,11 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 // you want to test easier.
 type Clientset struct {
 	testing.Fake
+	discovery *fakediscovery.FakeDiscovery
 }
 
 func (c *Clientset) Discovery() discovery.DiscoveryInterface {
-	return &fakediscovery.FakeDiscovery{Fake: &c.Fake}
+	return c.discovery
 }
 
 var _ clientset.Interface = &Clientset{}
@@ -126,6 +136,11 @@ func (c *Clientset) Batch() batchinternalversion.BatchInterface {
 // Certificates retrieves the CertificatesClient
 func (c *Clientset) Certificates() certificatesinternalversion.CertificatesInterface {
 	return &fakecertificatesinternalversion.FakeCertificates{Fake: &c.Fake}
+}
+
+// Events retrieves the EventsClient
+func (c *Clientset) Events() eventsinternalversion.EventsInterface {
+	return &fakeeventsinternalversion.FakeEvents{Fake: &c.Fake}
 }
 
 // Extensions retrieves the ExtensionsClient

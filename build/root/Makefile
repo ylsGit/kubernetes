@@ -123,7 +123,7 @@ verify:
 	@echo "$$VERIFY_HELP_INFO"
 else
 verify: verify_generated_files
-	KUBE_VERIFY_GIT_BRANCH=$(BRANCH) hack/make-rules/verify.sh -v
+	KUBE_VERIFY_GIT_BRANCH=$(BRANCH) hack/make-rules/verify.sh
 endif
 
 define QUICK_VERIFY_HELP_INFO
@@ -138,7 +138,7 @@ quick-verify:
 	@echo "$$QUICK_VERIFY_HELP_INFO"
 else
 quick-verify: verify_generated_files
-	hack/make-rules/verify.sh -v -Q
+	QUICK=true SILENT=false hack/make-rules/verify.sh
 endif
 
 define UPDATE_HELP_INFO
@@ -149,11 +149,11 @@ define UPDATE_HELP_INFO
 endef
 .PHONY: update
 ifeq ($(PRINT_HELP),y)
-update:
+update: generated_files
 	@echo "$$UPDATE_HELP_INFO"
 else
 update:
-	hack/update-all.sh
+	CALLED_FROM_MAIN_MAKEFILE=1 hack/make-rules/update.sh
 endif
 
 define CHECK_TEST_HELP_INFO
@@ -291,7 +291,6 @@ else
 test-cmd: generated_files
 	hack/make-rules/test-kubeadm-cmd.sh
 	hack/make-rules/test-cmd.sh
-	hack/make-rules/test-federation-cmd.sh
 endif
 
 define CLEAN_HELP_INFO
@@ -309,10 +308,7 @@ clean:
 else
 clean: clean_meta
 	build/make-clean.sh
-	rm -rf $(OUT_DIR)
-	rm -rf Godeps/_workspace # Just until we are sure it is gone
-	# TODO(thockin): Remove this when we call clean_generated.
-	rm -f pkg/generated/openapi/zz_generated.openapi.go
+	hack/make-rules/clean.sh
 endif
 
 define CLEAN_META_HELP_INFO
@@ -369,17 +365,23 @@ endif
 
 define RELEASE_HELP_INFO
 # Build a release
+# Use the 'release-in-a-container' target to build the release when already in
+# a container vs. creating a new container to build in using the 'release'
+# target.  Useful for running in GCB.
 #
 # Example:
 #   make release
+#   make release-in-a-container
 endef
-.PHONY: release
+.PHONY: release release-in-a-container
 ifeq ($(PRINT_HELP),y)
-release:
+release release-in-a-container:
 	@echo "$$RELEASE_HELP_INFO"
 else
 release:
 	build/release.sh
+release-in-a-container:
+	build/release-in-a-container.sh
 endif
 
 define RELEASE_SKIP_TESTS_HELP_INFO
@@ -387,7 +389,7 @@ define RELEASE_SKIP_TESTS_HELP_INFO
 #
 # Args:
 #   KUBE_RELEASE_RUN_TESTS: Whether to run tests. Set to 'y' to run tests anyways.
-#   KUBE_FASTBUILD: Whether to cross-compile for other architectures. Set to 'true' to do so.
+#   KUBE_FASTBUILD: Whether to cross-compile for other architectures. Set to 'false' to do so.
 #
 # Example:
 #   make release-skip-tests
@@ -404,19 +406,47 @@ release-skip-tests quick-release:
 	build/release.sh
 endif
 
+define PACKAGE_HELP_INFO
+# Package tarballs
+# Use the 'package-tarballs' target to run the final packaging steps of
+# a release.
+#
+# Example:
+#   make package-tarballs
+endef
+.PHONY: package package-tarballs
+ifeq ($(PRINT_HELP),y)
+package package-tarballs:
+	@echo "$$PACKAGE_HELP_INFO"
+else
+package package-tarballs:
+	build/package-tarballs.sh
+endif
+
 define CROSS_HELP_INFO
 # Cross-compile for all platforms
+# Use the 'cross-in-a-container' target to cross build when already in
+# a container vs. creating a new container to build from (build-image)
+# Useful for running in GCB.
 #
 # Example:
 #   make cross
+#   make cross-in-a-container
 endef
-.PHONY: cross
+.PHONY: cross cross-in-a-container
 ifeq ($(PRINT_HELP),y)
-cross:
+cross cross-in-a-container:
 	@echo "$$CROSS_HELP_INFO"
 else
 cross:
 	hack/make-rules/cross.sh
+cross-in-a-container: KUBE_OUTPUT_SUBPATH = $(OUT_DIR)/dockerized
+cross-in-a-container:
+ifeq (,$(wildcard /.dockerenv))
+	@echo -e "\nThe 'cross-in-a-container' target can only be used from within a docker container.\n"
+else
+	hack/make-rules/cross.sh
+endif
 endif
 
 define CMD_HELP_INFO
@@ -434,36 +464,6 @@ $(filter-out %$(EXCLUDE_TARGET),$(notdir $(abspath $(wildcard cmd/*/)))):
 else
 $(filter-out %$(EXCLUDE_TARGET),$(notdir $(abspath $(wildcard cmd/*/)))): generated_files
 	hack/make-rules/build.sh cmd/$@
-endif
-
-define PLUGIN_CMD_HELP_INFO
-# Add rules for all directories in plugin/cmd/
-#
-# Example:
-#   make kube-scheduler
-endef
-.PHONY: $(notdir $(abspath $(wildcard plugin/cmd/*/)))
-ifeq ($(PRINT_HELP),y)
-$(notdir $(abspath $(wildcard plugin/cmd/*/))):
-	@echo "$$PLUGIN_CMD_HELP_INFO"
-else
-$(notdir $(abspath $(wildcard plugin/cmd/*/))): generated_files
-	hack/make-rules/build.sh plugin/cmd/$@
-endif
-
-define FED_CMD_HELP_INFO
-# Add rules for all directories in federation/cmd/
-#
-# Example:
-#   make federation-apiserver federation-controller-manager
-endef
-.PHONY: $(notdir $(abspath $(wildcard federation/cmd/*/)))
-ifeq ($(PRINT_HELP),y)
-$(notdir $(abspath $(wildcard federation/cmd/*/))):
-	@echo "$$FED_CMD_HELP_INFO"
-else
-$(notdir $(abspath $(wildcard federation/cmd/*/))): generated_files
-	hack/make-rules/build.sh federation/cmd/$@
 endif
 
 define GENERATED_FILES_HELP_INFO
@@ -524,8 +524,9 @@ endef
 bazel-build:
 	@echo "$$BAZEL_BUILD_HELP_INFO"
 else
+# Some things in vendor don't build due to empty target lists for cross-platform rules.
 bazel-build:
-	bazel build //cmd/... //hack/... //pkg/... //federation/... //plugin/... //third_party/... //examples/... //test/... //vendor/k8s.io/...
+	bazel build -- //... -//vendor/...
 endif
 
 
@@ -539,8 +540,15 @@ endef
 bazel-test:
 	@echo "$$BAZEL_TEST_HELP_INFO"
 else
+# //hack:verify-all is a manual target.
+# We don't want to build any of the release artifacts when running tests.
+# Some things in vendor don't build due to empty target lists for cross-platform rules.
 bazel-test:
-	bazel test --test_tag_filters=-integration --flaky_test_attempts=3 //cmd/... //pkg/... //federation/... //plugin/... //third_party/... //hack/... //hack:verify-all //vendor/k8s.io/...
+	bazel test --build_tag_filters=-e2e,-integration --test_tag_filters=-e2e,-integration --flaky_test_attempts=3 -- \
+	  //... \
+	  //hack:verify-all \
+	  -//build/... \
+	  -//vendor/...
 endif
 
 ifeq ($(PRINT_HELP),y)

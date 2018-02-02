@@ -17,9 +17,8 @@ limitations under the License.
 package openstack
 
 import (
-	"errors"
 	"fmt"
-	"net/url"
+	"regexp"
 
 	"github.com/golang/glog"
 	"github.com/gophercloud/gophercloud"
@@ -32,6 +31,7 @@ import (
 
 type Instances struct {
 	compute *gophercloud.ServiceClient
+	opts    MetadataOpts
 }
 
 // Instances returns an implementation of Instances for OpenStack.
@@ -43,23 +43,26 @@ func (os *OpenStack) Instances() (cloudprovider.Instances, bool) {
 		return nil, false
 	}
 
-	glog.V(1).Info("Claiming to support Instances")
+	glog.V(4).Info("Claiming to support Instances")
 
-	return &Instances{compute}, true
+	return &Instances{
+		compute: compute,
+		opts:    os.metadataOpts,
+	}, true
 }
 
 // Implementation of Instances.CurrentNodeName
 // Note this is *not* necessarily the same as hostname.
 func (i *Instances) CurrentNodeName(hostname string) (types.NodeName, error) {
-	md, err := getMetadata()
+	md, err := getMetadata(i.opts.SearchOrder)
 	if err != nil {
 		return "", err
 	}
-	return types.NodeName(md.Name), nil
+	return types.NodeName(md.Hostname), nil
 }
 
 func (i *Instances) AddSSHKeyToAllInstances(user string, keyData []byte) error {
-	return errors.New("unimplemented")
+	return cloudprovider.NotImplemented
 }
 
 func (i *Instances) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
@@ -100,7 +103,7 @@ func (i *Instances) NodeAddressesByProviderID(providerID string) ([]v1.NodeAddre
 
 // ExternalID returns the cloud provider ID of the specified instance (deprecated).
 func (i *Instances) ExternalID(name types.NodeName) (string, error) {
-	srv, err := getServerByName(i.compute, name)
+	srv, err := getServerByName(i.compute, name, true)
 	if err != nil {
 		if err == ErrNotFound {
 			return "", cloudprovider.InstanceNotFound
@@ -110,10 +113,34 @@ func (i *Instances) ExternalID(name types.NodeName) (string, error) {
 	return srv.ID, nil
 }
 
+// InstanceExistsByProviderID returns true if the instance with the given provider id still exists and is running.
+// If false is returned with no error, the instance will be immediately deleted by the cloud controller manager.
+func (i *Instances) InstanceExistsByProviderID(providerID string) (bool, error) {
+	instanceID, err := instanceIDFromProviderID(providerID)
+	if err != nil {
+		return false, err
+	}
+
+	server, err := servers.Get(i.compute, instanceID).Extract()
+	if err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if server.Status != "ACTIVE" {
+		glog.Warningf("the instance %s is not active", instanceID)
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // InstanceID returns the kubelet's cloud provider ID.
 func (os *OpenStack) InstanceID() (string, error) {
 	if len(os.localInstanceID) == 0 {
-		id, err := readInstanceID()
+		id, err := readInstanceID(os.metadataOpts.SearchOrder)
 		if err != nil {
 			return "", err
 		}
@@ -124,7 +151,7 @@ func (os *OpenStack) InstanceID() (string, error) {
 
 // InstanceID returns the cloud provider ID of the specified instance.
 func (i *Instances) InstanceID(name types.NodeName) (string, error) {
-	srv, err := getServerByName(i.compute, name)
+	srv, err := getServerByName(i.compute, name, true)
 	if err != nil {
 		if err == ErrNotFound {
 			return "", cloudprovider.InstanceNotFound
@@ -157,7 +184,7 @@ func (i *Instances) InstanceTypeByProviderID(providerID string) (string, error) 
 
 // InstanceType returns the type of the specified instance.
 func (i *Instances) InstanceType(name types.NodeName) (string, error) {
-	srv, err := getServerByName(i.compute, name)
+	srv, err := getServerByName(i.compute, name, true)
 
 	if err != nil {
 		return "", err
@@ -180,14 +207,16 @@ func srvInstanceType(srv *servers.Server) (string, error) {
 	return "", fmt.Errorf("flavor name/id not found")
 }
 
+// instanceIDFromProviderID splits a provider's id and return instanceID.
+// A providerID is build out of '${ProviderName}:///${instance-id}'which contains ':///'.
+// See cloudprovider.GetInstanceProviderID and Instances.InstanceID.
 func instanceIDFromProviderID(providerID string) (instanceID string, err error) {
-	parsedID, err := url.Parse(providerID)
-	if err != nil {
-		return "", err
-	}
-	if parsedID.Scheme != ProviderName {
-		return "", fmt.Errorf("unrecognized provider %q", parsedID.Scheme)
-	}
+	// If Instances.InstanceID or cloudprovider.GetInstanceProviderID is changed, the regexp should be changed too.
+	var providerIdRegexp = regexp.MustCompile(`^` + ProviderName + `:///([^/]+)$`)
 
-	return parsedID.Host, nil
+	matches := providerIdRegexp.FindStringSubmatch(providerID)
+	if len(matches) != 2 {
+		return "", fmt.Errorf("ProviderID \"%s\" didn't match expected format \"openstack:///InstanceID\"", providerID)
+	}
+	return matches[1], nil
 }

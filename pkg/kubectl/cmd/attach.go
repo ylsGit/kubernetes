@@ -30,7 +30,8 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
@@ -70,7 +71,8 @@ func NewCmdAttach(f cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) 
 		Attach: &DefaultRemoteAttach{},
 	}
 	cmd := &cobra.Command{
-		Use:     "attach (POD | TYPE/NAME) -c CONTAINER",
+		Use: "attach (POD | TYPE/NAME) -c CONTAINER",
+		DisableFlagsInUseLine: true,
 		Short:   i18n.T("Attach to a running container"),
 		Long:    "Attach to a process that is already running inside an existing container.",
 		Example: attachExample,
@@ -142,7 +144,8 @@ func (p *AttachOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, argsIn [
 		return cmdutil.UsageErrorf(cmd, err.Error())
 	}
 
-	builder := f.NewBuilder(true).
+	builder := f.NewBuilder().
+		Internal().
 		NamespaceParam(namespace).DefaultNamespace()
 
 	switch len(argsIn) {
@@ -257,11 +260,6 @@ func (p *AttachOptions) Run() error {
 	}
 
 	fn := func() error {
-
-		if !p.Quiet && stderr != nil {
-			fmt.Fprintln(stderr, "If you don't see a command prompt, try pressing enter.")
-		}
-
 		restClient, err := restclient.RESTClientFor(p.Config)
 		if err != nil {
 			return err
@@ -278,11 +276,14 @@ func (p *AttachOptions) Run() error {
 			Stdout:    p.Out != nil,
 			Stderr:    p.Err != nil,
 			TTY:       t.Raw,
-		}, api.ParameterCodec)
+		}, legacyscheme.ParameterCodec)
 
 		return p.Attach.Attach("POST", req.URL(), p.Config, p.In, p.Out, p.Err, t.Raw, sizeQueue)
 	}
 
+	if !p.Quiet && stderr != nil {
+		fmt.Fprintln(stderr, "If you don't see a command prompt, try pressing enter.")
+	}
 	if err := t.Safe(fn); err != nil {
 		return err
 	}

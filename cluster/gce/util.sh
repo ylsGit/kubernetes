@@ -18,23 +18,30 @@
 
 # Use the config file specified in $KUBE_CONFIG_FILE, or default to
 # config-default.sh.
+readonly GCE_MAX_LOCAL_SSD=8
+
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
 source "${KUBE_ROOT}/cluster/gce/${KUBE_CONFIG_FILE-"config-default.sh"}"
 source "${KUBE_ROOT}/cluster/common.sh"
 source "${KUBE_ROOT}/hack/lib/util.sh"
 
-if [[ "${NODE_OS_DISTRIBUTION}" == "debian" || "${NODE_OS_DISTRIBUTION}" == "container-linux" || "${NODE_OS_DISTRIBUTION}" == "trusty" || "${NODE_OS_DISTRIBUTION}" == "gci" || "${NODE_OS_DISTRIBUTION}" == "ubuntu" ]]; then
+if [[ "${NODE_OS_DISTRIBUTION}" == "gci" || "${NODE_OS_DISTRIBUTION}" == "ubuntu" ]]; then
   source "${KUBE_ROOT}/cluster/gce/${NODE_OS_DISTRIBUTION}/node-helper.sh"
 else
   echo "Cannot operate on cluster using node os distro: ${NODE_OS_DISTRIBUTION}" >&2
   exit 1
 fi
 
-if [[ "${MASTER_OS_DISTRIBUTION}" == "container-linux" || "${MASTER_OS_DISTRIBUTION}" == "trusty" || "${MASTER_OS_DISTRIBUTION}" == "gci" || "${MASTER_OS_DISTRIBUTION}" == "ubuntu" ]]; then
+if [[ "${MASTER_OS_DISTRIBUTION}" == "trusty" || "${MASTER_OS_DISTRIBUTION}" == "gci" || "${MASTER_OS_DISTRIBUTION}" == "ubuntu" ]]; then
   source "${KUBE_ROOT}/cluster/gce/${MASTER_OS_DISTRIBUTION}/master-helper.sh"
 else
   echo "Cannot operate on cluster using master os distro: ${MASTER_OS_DISTRIBUTION}" >&2
   exit 1
+fi
+
+if [[ ${NODE_LOCAL_SSDS:-} -ge 1 ]] && [[ ! -z ${NODE_LOCAL_SSDS_EXT:-} ]] ; then
+  echo -e "${color_red}Local SSD: Only one of NODE_LOCAL_SSDS and NODE_LOCAL_SSDS_EXT can be specified at once${color_norm}" >&2
+  exit 2
 fi
 
 if [[ "${MASTER_OS_DISTRIBUTION}" == "gci" ]]; then
@@ -84,7 +91,8 @@ if [[ "${ENABLE_CLUSTER_AUTOSCALER}" == "true" ]]; then
   fi
 fi
 
-NODE_INSTANCE_PREFIX="${INSTANCE_PREFIX}-minion"
+NODE_INSTANCE_PREFIX=${NODE_INSTANCE_PREFIX:-"${INSTANCE_PREFIX}-minion"}
+
 NODE_TAGS="${NODE_TAG}"
 
 ALLOCATE_NODE_CIDRS=true
@@ -132,11 +140,14 @@ function verify-prereqs() {
 #
 # Vars set:
 #   PROJECT
+#   NETWORK_PROJECT
 #   PROJECT_REPORTED
 function detect-project() {
   if [[ -z "${PROJECT-}" ]]; then
     PROJECT=$(gcloud config list project --format 'value(core.project)')
   fi
+
+  NETWORK_PROJECT=${NETWORK_PROJECT:-${PROJECT}}
 
   if [[ -z "${PROJECT-}" ]]; then
     echo "Could not detect Google Cloud Platform project.  Set the default project using " >&2
@@ -145,6 +156,7 @@ function detect-project() {
   fi
   if [[ -z "${PROJECT_REPORTED-}" ]]; then
     echo "Project: ${PROJECT}" >&2
+    echo "Network Project: ${NETWORK_PROJECT}" >&2
     echo "Zone: ${ZONE}" >&2
     PROJECT_REPORTED=true
   fi
@@ -231,11 +243,11 @@ function set-preferred-region() {
   else
     KUBE_ADDON_REGISTRY="gcr.io/google_containers"
   fi
-
-  if [[ "${ENABLE_DOCKER_REGISTRY_CACHE:-}" == "true" ]]; then
-    DOCKER_REGISTRY_MIRROR_URL="https://${preferred}-mirror.gcr.io"
-  fi
 }
+
+if [[ "${ENABLE_DOCKER_REGISTRY_CACHE:-}" == "true" ]]; then
+  DOCKER_REGISTRY_MIRROR_URL="https://mirror.gcr.io"
+fi
 
 # Take the local tar files and upload them to Google Storage.  They will then be
 # downloaded by the master as part of the start up script for the master.
@@ -243,21 +255,16 @@ function set-preferred-region() {
 # Assumed vars:
 #   PROJECT
 #   SERVER_BINARY_TAR
-#   SALT_TAR
 #   KUBE_MANIFESTS_TAR
 #   ZONE
 # Vars set:
 #   SERVER_BINARY_TAR_URL
 #   SERVER_BINARY_TAR_HASH
-#   SALT_TAR_URL
-#   SALT_TAR_HASH
 #   KUBE_MANIFESTS_TAR_URL
 #   KUBE_MANIFESTS_TAR_HASH
 function upload-server-tars() {
   SERVER_BINARY_TAR_URL=
   SERVER_BINARY_TAR_HASH=
-  SALT_TAR_URL=
-  SALT_TAR_HASH=
   KUBE_MANIFESTS_TAR_URL=
   KUBE_MANIFESTS_TAR_HASH=
 
@@ -275,13 +282,11 @@ function upload-server-tars() {
   set-preferred-region
 
   SERVER_BINARY_TAR_HASH=$(sha1sum-file "${SERVER_BINARY_TAR}")
-  SALT_TAR_HASH=$(sha1sum-file "${SALT_TAR}")
   if [[ -n "${KUBE_MANIFESTS_TAR:-}" ]]; then
     KUBE_MANIFESTS_TAR_HASH=$(sha1sum-file "${KUBE_MANIFESTS_TAR}")
   fi
 
   local server_binary_tar_urls=()
-  local salt_tar_urls=()
   local kube_manifest_tar_urls=()
 
   for region in "${PREFERRED_REGION[@]}"; do
@@ -301,13 +306,10 @@ function upload-server-tars() {
 
     echo "+++ Staging server tars to Google Storage: ${staging_path}"
     local server_binary_gs_url="${staging_path}/${SERVER_BINARY_TAR##*/}"
-    local salt_gs_url="${staging_path}/${SALT_TAR##*/}"
     copy-to-staging "${staging_path}" "${server_binary_gs_url}" "${SERVER_BINARY_TAR}" "${SERVER_BINARY_TAR_HASH}"
-    copy-to-staging "${staging_path}" "${salt_gs_url}" "${SALT_TAR}" "${SALT_TAR_HASH}"
 
     # Convert from gs:// URL to an https:// URL
     server_binary_tar_urls+=("${server_binary_gs_url/gs:\/\//https://storage.googleapis.com/}")
-    salt_tar_urls+=("${salt_gs_url/gs:\/\//https://storage.googleapis.com/}")
     if [[ -n "${KUBE_MANIFESTS_TAR:-}" ]]; then
       local kube_manifests_gs_url="${staging_path}/${KUBE_MANIFESTS_TAR##*/}"
       copy-to-staging "${staging_path}" "${kube_manifests_gs_url}" "${KUBE_MANIFESTS_TAR}" "${KUBE_MANIFESTS_TAR_HASH}"
@@ -317,7 +319,6 @@ function upload-server-tars() {
   done
 
   SERVER_BINARY_TAR_URL=$(join_csv "${server_binary_tar_urls[@]}")
-  SALT_TAR_URL=$(join_csv "${salt_tar_urls[@]}")
   if [[ -n "${KUBE_MANIFESTS_TAR:-}" ]]; then
     KUBE_MANIFESTS_TAR_URL=$(join_csv "${kube_manifests_tar_urls[@]}")
   fi
@@ -334,9 +335,9 @@ function detect-node-names() {
   detect-project
   INSTANCE_GROUPS=()
   INSTANCE_GROUPS+=($(gcloud compute instance-groups managed list \
-    --zones "${ZONE}" --project "${PROJECT}" \
-    --regexp "${NODE_INSTANCE_PREFIX}-.+" \
-    --format='value(instanceGroup)' || true))
+    --project "${PROJECT}" \
+    --filter "name ~ '${NODE_INSTANCE_PREFIX}-.+' AND zone:(${ZONE})" \
+    --format='value(name)' || true))
   NODE_NAMES=()
   if [[ -n "${INSTANCE_GROUPS[@]:-}" ]]; then
     for group in "${INSTANCE_GROUPS[@]}"; do
@@ -397,12 +398,12 @@ function detect-master() {
   if [[ -z "${KUBE_MASTER_IP-}" ]]; then
     local master_address_name="${MASTER_NAME}-ip"
     echo "Looking for address '${master_address_name}'" >&2
-    KUBE_MASTER_IP=$(gcloud compute addresses describe "${master_address_name}" \
-      --project "${PROJECT}" --region "${REGION}" -q --format='value(address)')
-  fi
-  if [[ -z "${KUBE_MASTER_IP-}" ]]; then
-    echo "Could not detect Kubernetes master node.  Make sure you've launched a cluster with 'kube-up.sh'" >&2
-    exit 1
+    if ! KUBE_MASTER_IP=$(gcloud compute addresses describe "${master_address_name}" \
+      --project "${PROJECT}" --region "${REGION}" -q --format='value(address)') || \
+      [[ -z "${KUBE_MASTER_IP-}" ]]; then
+      echo "Could not detect Kubernetes master node.  Make sure you've launched a cluster with 'kube-up.sh'" >&2
+      exit 1
+    fi
   fi
   echo "Using master: $KUBE_MASTER (external IP: $KUBE_MASTER_IP)" >&2
 }
@@ -478,7 +479,7 @@ function create-firewall-rule() {
   local attempt=0
   while true; do
     if ! gcloud compute firewall-rules create "$1" \
-      --project "${PROJECT}" \
+      --project "${NETWORK_PROJECT}" \
       --network "${NETWORK}" \
       --source-ranges "$2" \
       --target-tags "$3" \
@@ -498,28 +499,34 @@ function create-firewall-rule() {
 
 # Format the string argument for gcloud network.
 function make-gcloud-network-argument() {
-  local network="$1"
-  local address="$2"          # optional
-  local enable_ip_alias="$3"  # optional
-  local alias_subnetwork="$4" # optional
-  local alias_size="$5"       # optional
+  local network_project="$1"
+  local region="$2"
+  local network="$3"
+  local subnet="$4"
+  local address="$5"          # optional
+  local enable_ip_alias="$6"  # optional
+  local alias_size="$7"       # optional
+
+  local networkURL="projects/${network_project}/global/networks/${network}"
+  local subnetURL="projects/${network_project}/regions/${region}/subnetworks/${subnet:-}"
 
   local ret=""
 
   if [[ "${enable_ip_alias}" == 'true' ]]; then
     ret="--network-interface"
-    ret="${ret} network=${network}"
+    ret="${ret} network=${networkURL}"
     # If address is omitted, instance will not receive an external IP.
     ret="${ret},address=${address:-}"
-    ret="${ret},subnet=${alias_subnetwork}"
+    ret="${ret},subnet=${subnetURL}"
     ret="${ret},aliases=pods-default:${alias_size}"
     ret="${ret} --no-can-ip-forward"
   else
-    if [[ ${ENABLE_BIG_CLUSTER_SUBNETS} != "true" || (${PREEXISTING_NETWORK} = "true" && "${PREEXISTING_NETWORK_MODE}" != "custom") ]]; then
-      ret="--network ${network}"
+    if [[ -n ${subnet:-} ]]; then
+      ret="${ret} --subnet ${subnetURL}"
     else
-      ret="--subnet=${network}"
+      ret="${ret} --network ${networkURL}"
     fi
+
     ret="${ret} --can-ip-forward"
     if [[ -n ${address:-} ]]; then
       ret="${ret} --address ${address}"
@@ -535,12 +542,36 @@ function get-template-name-from-version() {
   echo "${NODE_INSTANCE_PREFIX}-template-${1}" | cut -c 1-63 | sed 's/[\.\+]/-/g;s/-*$//g'
 }
 
+# validates the NODE_LOCAL_SSDS_EXT variable 
+function validate-node-local-ssds-ext(){
+  ssdopts="${1}"
+
+  if [[ -z "${ssdopts[0]}" || -z "${ssdopts[1]}" || -z "${ssdopts[2]}" ]]; then
+	  echo -e "${color_red}Local SSD: NODE_LOCAL_SSDS_EXT is malformed, found ${ssdopts[0]-_},${ssdopts[1]-_},${ssdopts[2]-_} ${color_norm}" >&2
+    exit 2
+  fi
+  if [[ "${ssdopts[1]}" != "scsi" && "${ssdopts[1]}" != "nvme" ]]; then
+    echo -e "${color_red}Local SSD: Interface must be scsi or nvme, found: ${ssdopts[1]} ${color_norm}" >&2
+    exit 2
+  fi
+  if [[ "${ssdopts[2]}" != "fs" && "${ssdopts[2]}" != "block" ]]; then
+    echo -e "${color_red}Local SSD: Filesystem type must be fs or block, found: ${ssdopts[2]} ${color_norm}"  >&2
+    exit 2
+  fi
+  local_ssd_ext_count=$((local_ssd_ext_count+ssdopts[0]))
+  if [[ "${local_ssd_ext_count}" -gt "${GCE_MAX_LOCAL_SSD}" || "${local_ssd_ext_count}" -lt 1 ]]; then
+    echo -e "${color_red}Local SSD: Total number of local ssds must range from 1 to 8, found: ${local_ssd_ext_count} ${color_norm}" >&2
+    exit 2
+  fi
+}
+
 # Robustly try to create an instance template.
 # $1: The name of the instance template.
 # $2: The scopes flag.
 # $3: String of comma-separated metadata entries (must all be from a file).
 function create-node-template() {
   detect-project
+  detect-subnetworks
   local template_name="$1"
 
   # First, ensure the template doesn't exist.
@@ -575,6 +606,19 @@ function create-node-template() {
   fi
 
   local local_ssds=""
+  local_ssd_ext_count=0
+  if [[ ! -z ${NODE_LOCAL_SSDS_EXT:-} ]]; then
+    IFS=";" read -r -a ssdgroups <<< "${NODE_LOCAL_SSDS_EXT:-}"
+    for ssdgroup in "${ssdgroups[@]}"
+    do
+      IFS="," read -r -a ssdopts <<< "${ssdgroup}"
+      validate-node-local-ssds-ext "${ssdopts}"
+      for i in $(seq ${ssdopts[0]}); do
+        local_ssds="$local_ssds--local-ssd=interface=${ssdopts[1]} "
+      done
+    done
+  fi
+  
   if [[ ! -z ${NODE_LOCAL_SSDS+x} ]]; then
     # The NODE_LOCAL_SSDS check below fixes issue #49171
     # Some versions of seq will count down from 1 if "seq 0" is specified
@@ -584,11 +628,15 @@ function create-node-template() {
       done
     fi
   fi
+  
 
   local network=$(make-gcloud-network-argument \
-    "${NETWORK}" "" \
+    "${NETWORK_PROJECT}" \
+    "${REGION}" \
+    "${NETWORK}" \
+    "${SUBNETWORK:-}" \
+    "" \
     "${ENABLE_IP_ALIASES:-}" \
-    "${IP_ALIAS_SUBNETWORK:-}" \
     "${IP_ALIAS_SIZE:-}")
 
   local attempt=1
@@ -602,6 +650,7 @@ function create-node-template() {
       --boot-disk-size "${NODE_DISK_SIZE}" \
       --image-project="${NODE_IMAGE_PROJECT}" \
       --image "${NODE_IMAGE}" \
+      --service-account "${NODE_SERVICE_ACCOUNT}" \
       --tags "${NODE_TAG}" \
       ${accelerator_args} \
       ${local_ssds} \
@@ -706,6 +755,7 @@ function kube-up() {
     detect-master
     parse-master-env
     create-subnetworks
+    detect-subnetworks
     create-nodes
   elif [[ ${KUBE_REPLICATE_EXISTING_MASTER:-} == "true" ]]; then
     if  [[ "${MASTER_OS_DISTRIBUTION}" != "gci" && "${MASTER_OS_DISTRIBUTION}" != "debian" && "${MASTER_OS_DISTRIBUTION}" != "ubuntu" ]]; then
@@ -722,6 +772,7 @@ function kube-up() {
     check-existing
     create-network
     create-subnetworks
+    detect-subnetworks
     write-cluster-name
     create-autoscaler-config
     create-master
@@ -755,39 +806,55 @@ function check-existing() {
   fi
 }
 
+# TODO(#54017): Remove below logics for handling deprecated network mode field.
+# `x_gcloud_mode` was replaced by `x_gcloud_subnet_mode` in gcloud 175.0.0 and
+# the content changed as well. Keeping such logic to make the transition eaiser.
+function check-network-mode() {
+  local mode="$(gcloud compute networks list --filter="name=('${NETWORK}')" --project ${NETWORK_PROJECT} --format='value(x_gcloud_subnet_mode)' || true)"
+  if [[ -z "${mode}" ]]; then
+    mode="$(gcloud compute networks list --filter="name=('${NETWORK}')" --project ${NETWORK_PROJECT} --format='value(x_gcloud_mode)' || true)"
+  fi
+  # The deprecated field uses lower case. Convert to upper case for consistency.
+  echo "$(echo $mode | tr [a-z] [A-Z])"
+}
+
 function create-network() {
-  if ! gcloud compute networks --project "${PROJECT}" describe "${NETWORK}" &>/dev/null; then
-    echo "Creating new network: ${NETWORK}"
+  if ! gcloud compute networks --project "${NETWORK_PROJECT}" describe "${NETWORK}" &>/dev/null; then
     # The network needs to be created synchronously or we have a race. The
     # firewalls can be added concurrent with instance creation.
-    gcloud compute networks create --project "${PROJECT}" "${NETWORK}" --mode=auto
+    local network_mode="auto"
+    if [[ "${CREATE_CUSTOM_NETWORK:-}" == "true" ]]; then
+      network_mode="custom"
+    fi
+    echo "Creating new ${network_mode} network: ${NETWORK}"
+    gcloud compute networks create --project "${NETWORK_PROJECT}" "${NETWORK}" --mode="${network_mode}"
   else
     PREEXISTING_NETWORK=true
-    PREEXISTING_NETWORK_MODE="$(gcloud compute networks list ${NETWORK} --format='value(x_gcloud_mode)' || true)"
+    PREEXISTING_NETWORK_MODE="$(check-network-mode)"
     echo "Found existing network ${NETWORK} in ${PREEXISTING_NETWORK_MODE} mode."
   fi
 
-  if ! gcloud compute firewall-rules --project "${PROJECT}" describe "${CLUSTER_NAME}-default-internal-master" &>/dev/null; then
+  if ! gcloud compute firewall-rules --project "${NETWORK_PROJECT}" describe "${CLUSTER_NAME}-default-internal-master" &>/dev/null; then
     gcloud compute firewall-rules create "${CLUSTER_NAME}-default-internal-master" \
-      --project "${PROJECT}" \
+      --project "${NETWORK_PROJECT}" \
       --network "${NETWORK}" \
       --source-ranges "10.0.0.0/8" \
       --allow "tcp:1-2379,tcp:2382-65535,udp:1-65535,icmp" \
       --target-tags "${MASTER_TAG}"&
   fi
 
-  if ! gcloud compute firewall-rules --project "${PROJECT}" describe "${CLUSTER_NAME}-default-internal-node" &>/dev/null; then
+  if ! gcloud compute firewall-rules --project "${NETWORK_PROJECT}" describe "${CLUSTER_NAME}-default-internal-node" &>/dev/null; then
     gcloud compute firewall-rules create "${CLUSTER_NAME}-default-internal-node" \
-      --project "${PROJECT}" \
+      --project "${NETWORK_PROJECT}" \
       --network "${NETWORK}" \
       --source-ranges "10.0.0.0/8" \
       --allow "tcp:1-65535,udp:1-65535,icmp" \
       --target-tags "${NODE_TAG}"&
   fi
 
-  if ! gcloud compute firewall-rules describe --project "${PROJECT}" "${NETWORK}-default-ssh" &>/dev/null; then
+  if ! gcloud compute firewall-rules describe --project "${NETWORK_PROJECT}" "${NETWORK}-default-ssh" &>/dev/null; then
     gcloud compute firewall-rules create "${NETWORK}-default-ssh" \
-      --project "${PROJECT}" \
+      --project "${NETWORK_PROJECT}" \
       --network "${NETWORK}" \
       --source-ranges "0.0.0.0/0" \
       --allow "tcp:22" &
@@ -797,11 +864,11 @@ function create-network() {
 function expand-default-subnetwork() {
   gcloud compute networks switch-mode "${NETWORK}" \
     --mode custom \
-    --project "${PROJECT}" \
+    --project "${NETWORK_PROJECT}" \
     --quiet || true
   gcloud compute networks subnets expand-ip-range "${NETWORK}" \
     --region="${REGION}" \
-    --project "${PROJECT}" \
+    --project "${NETWORK_PROJECT}" \
     --prefix-length=19 \
     --quiet
 }
@@ -811,12 +878,14 @@ function create-subnetworks() {
     true) echo "IP aliases are enabled. Creating subnetworks.";;
     false)
       echo "IP aliases are disabled."
-      if [[ "${ENABLE_BIG_CLUSTER_SUBNETS}" = "true" ]]; then 
+      if [[ "${ENABLE_BIG_CLUSTER_SUBNETS}" = "true" ]]; then
         if [[  "${PREEXISTING_NETWORK}" != "true" ]]; then
           expand-default-subnetwork
         else
           echo "${color_yellow}Using pre-existing network ${NETWORK}, subnets won't be expanded to /19!${color_norm}"
         fi
+      elif [[ "${CREATE_CUSTOM_NETWORK:-}" == "true" && "${PREEXISTING_NETWORK}" != "true" ]]; then
+          gcloud compute networks subnets create "${SUBNETWORK}" --project "${NETWORK_PROJECT}" --region "${REGION}" --network "${NETWORK}" --range "${NODE_IP_RANGE}"
       fi
       return;;
     *) echo "${color_red}Invalid argument to ENABLE_IP_ALIASES${color_norm}"
@@ -826,7 +895,7 @@ function create-subnetworks() {
   # Look for the alias subnet, it must exist and have a secondary
   # range configured.
   local subnet=$(gcloud beta compute networks subnets describe \
-    --project "${PROJECT}" \
+    --project "${NETWORK_PROJECT}" \
     --region ${REGION} \
     ${IP_ALIAS_SUBNETWORK} 2>/dev/null)
   if [[ -z ${subnet} ]]; then
@@ -836,20 +905,16 @@ function create-subnetworks() {
       exit 1
     fi
 
-    if [[ -z ${NODE_IP_RANGE:-} ]]; then
-      echo "${color_red}NODE_IP_RANGE must be specified{color_norm}"
-      exit 1
-    fi
-
     echo "Creating subnet ${NETWORK}:${IP_ALIAS_SUBNETWORK}"
     gcloud beta compute networks subnets create \
       ${IP_ALIAS_SUBNETWORK} \
       --description "Automatically generated subnet for ${INSTANCE_PREFIX} cluster. This will be removed on cluster teardown." \
-      --project "${PROJECT}" \
+      --project "${NETWORK_PROJECT}" \
       --network ${NETWORK} \
       --region ${REGION} \
       --range ${NODE_IP_RANGE} \
-      --secondary-range "pods-default=${CLUSTER_IP_RANGE}"
+      --secondary-range "pods-default=${CLUSTER_IP_RANGE}" \
+      --secondary-range "services-default=${SERVICE_CLUSTER_IP_RANGE}"
     echo "Created subnetwork ${IP_ALIAS_SUBNETWORK}"
   else
     if ! echo ${subnet} | grep --quiet secondaryIpRanges ${subnet}; then
@@ -857,37 +922,57 @@ function create-subnetworks() {
       exit 1
     fi
   fi
+}
 
-  # Services subnetwork.
-  local subnet=$(gcloud beta compute networks subnets describe \
-    --project "${PROJECT}" \
-    --region ${REGION} \
-    ${SERVICE_CLUSTER_IP_SUBNETWORK} 2>/dev/null)
+# detect-subnetworks sets the SUBNETWORK var if not already set
+# Assumed vars:
+#   NETWORK
+#   REGION
+#   NETWORK_PROJECT
+#
+# Optional vars:
+#   SUBNETWORK
+#   IP_ALIAS_SUBNETWORK
+function detect-subnetworks() {
+  if [[ -n ${SUBNETWORK:-} ]]; then
+    echo "Using subnet ${SUBNETWORK}"
+    return 0
+  fi
 
-  if [[ -z ${subnet} ]]; then
-    if [[ ${SERVICE_CLUSTER_IP_SUBNETWORK} != ${INSTANCE_PREFIX}-subnet-services ]]; then
-      echo "${color_red}Subnetwork ${NETWORK}:${SERVICE_CLUSTER_IP_SUBNETWORK} does not exist${color_norm}"
-      exit 1
-    fi
+  if [[ -n ${IP_ALIAS_SUBNETWORK:-} ]]; then
+    SUBNETWORK=${IP_ALIAS_SUBNETWORK}
+    echo "Using IP Alias subnet ${SUBNETWORK}"
+    return 0
+  fi
 
-    echo "Creating subnet for reserving service cluster IPs ${NETWORK}:${SERVICE_CLUSTER_IP_SUBNETWORK}"
-    gcloud beta compute networks subnets create \
-      ${SERVICE_CLUSTER_IP_SUBNETWORK} \
-      --description "Automatically generated subnet for ${INSTANCE_PREFIX} cluster. This will be removed on cluster teardown." \
-      --project "${PROJECT}" \
-      --network ${NETWORK} \
-      --region ${REGION} \
-      --range ${SERVICE_CLUSTER_IP_RANGE}
-    echo "Created subnetwork ${SERVICE_CLUSTER_IP_SUBNETWORK}"
+  SUBNETWORK=$(gcloud beta compute networks subnets list \
+    --network=${NETWORK} \
+    --regions=${REGION} \
+    --project=${NETWORK_PROJECT} \
+    --limit=1 \
+    --format='value(name)' 2>/dev/null)
+
+  if [[ -n ${SUBNETWORK:-} ]]; then
+    echo "Found subnet for region ${REGION} in network ${NETWORK}: ${SUBNETWORK}"
+    return 0
+  fi
+
+  echo "${color_red}Could not find subnetwork with region ${REGION}, network ${NETWORK}, and project ${NETWORK_PROJECT}"
+}
+
+function delete-all-firewall-rules() {
+  if fws=$(gcloud compute firewall-rules list --project "${NETWORK_PROJECT}" --filter="network=${NETWORK}" --format="value(name)"); then
+    echo "Deleting firewall rules remaining in network ${NETWORK}: ${fws}"
+    delete-firewall-rules "$fws"
   else
-    echo "Subnet ${SERVICE_CLUSTER_IP_SUBNETWORK} already exists"
+    echo "Failed to list firewall rules from the network ${NETWORK}"
   fi
 }
 
 function delete-firewall-rules() {
   for fw in $@; do
-    if [[ -n $(gcloud compute firewall-rules --project "${PROJECT}" describe "${fw}" --format='value(name)' 2>/dev/null || true) ]]; then
-      gcloud compute firewall-rules delete --project "${PROJECT}" --quiet "${fw}" &
+    if [[ -n $(gcloud compute firewall-rules --project "${NETWORK_PROJECT}" describe "${fw}" --format='value(name)' 2>/dev/null || true) ]]; then
+      gcloud compute firewall-rules delete --project "${NETWORK_PROJECT}" --quiet "${fw}" &
     fi
   done
   kube::util::wait-for-jobs || {
@@ -896,10 +981,10 @@ function delete-firewall-rules() {
 }
 
 function delete-network() {
-  if [[ -n $(gcloud compute networks --project "${PROJECT}" describe "${NETWORK}" --format='value(name)' 2>/dev/null || true) ]]; then
-    if ! gcloud compute networks delete --project "${PROJECT}" --quiet "${NETWORK}"; then
+  if [[ -n $(gcloud compute networks --project "${NETWORK_PROJECT}" describe "${NETWORK}" --format='value(name)' 2>/dev/null || true) ]]; then
+    if ! gcloud compute networks delete --project "${NETWORK_PROJECT}" --quiet "${NETWORK}"; then
       echo "Failed to delete network '${NETWORK}'. Listing firewall-rules:"
-      gcloud compute firewall-rules --project "${PROJECT}" list --filter="network=${NETWORK}"
+      gcloud compute firewall-rules --project "${NETWORK_PROJECT}" list --filter="network=${NETWORK}"
       return 1
     fi
   fi
@@ -907,15 +992,18 @@ function delete-network() {
 
 function delete-subnetworks() {
   if [[ ${ENABLE_IP_ALIASES:-} != "true" ]]; then
-    if [[ "${ENABLE_BIG_CLUSTER_SUBNETS}" = "true" ]]; then
-      # If running in custom mode network we need to delete subnets
-      mode="$(gcloud compute networks list ${NETWORK} --format='value(x_gcloud_mode)' || true)"
-      if [[ "${mode}" == "custom" ]]; then
+    # If running in custom mode network we need to delete subnets
+    mode="$(check-network-mode)"
+    if [[ "${mode}" == "CUSTOM" ]]; then
+      if [[ "${ENABLE_BIG_CLUSTER_SUBNETS}" = "true" ]]; then
         echo "Deleting default subnets..."
         # This value should be kept in sync with number of regions.
         local parallelism=9
-        gcloud compute networks subnets list --network="${NETWORK}" --format='value(region.basename())' | \
-          xargs -i -P ${parallelism} gcloud --quiet compute networks subnets delete "${NETWORK}" --region="{}" || true
+        gcloud compute networks subnets list --network="${NETWORK}" --project "${NETWORK_PROJECT}" --format='value(region.basename())' | \
+          xargs -i -P ${parallelism} gcloud --quiet compute networks subnets delete "${NETWORK}" --project "${NETWORK_PROJECT}" --region="{}" || true
+      elif [[ "${CREATE_CUSTOM_NETWORK:-}" == "true" ]]; then
+        echo "Deleting custom subnet..."
+        gcloud --quiet compute networks subnets delete "${SUBNETWORK}" --project "${NETWORK_PROJECT}" --region="${REGION}" || true
       fi
     fi
     return
@@ -925,26 +1013,13 @@ function delete-subnetworks() {
   if [[ ${IP_ALIAS_SUBNETWORK} == ${INSTANCE_PREFIX}-subnet-default ]]; then
     echo "Removing auto-created subnet ${NETWORK}:${IP_ALIAS_SUBNETWORK}"
     if [[ -n $(gcloud beta compute networks subnets describe \
-          --project "${PROJECT}" \
+          --project "${NETWORK_PROJECT}" \
           --region ${REGION} \
           ${IP_ALIAS_SUBNETWORK} 2>/dev/null) ]]; then
       gcloud beta --quiet compute networks subnets delete \
-        --project "${PROJECT}" \
+        --project "${NETWORK_PROJECT}" \
         --region ${REGION} \
         ${IP_ALIAS_SUBNETWORK}
-    fi
-  fi
-
-  if [[ ${SERVICE_CLUSTER_IP_SUBNETWORK} == ${INSTANCE_PREFIX}-subnet-services ]]; then
-    echo "Removing auto-created subnet ${NETWORK}:${SERVICE_CLUSTER_IP_SUBNETWORK}"
-    if [[ -n $(gcloud beta compute networks subnets describe \
-          --project "${PROJECT}" \
-          --region ${REGION} \
-          ${SERVICE_CLUSTER_IP_SUBNETWORK} 2>/dev/null) ]]; then
-      gcloud --quiet beta compute networks subnets delete \
-        --project "${PROJECT}" \
-        --region ${REGION} \
-        ${SERVICE_CLUSTER_IP_SUBNETWORK}
     fi
   fi
 }
@@ -987,7 +1062,7 @@ function create-etcd-certs {
 function create-master() {
   echo "Starting master and configuring firewalls"
   gcloud compute firewall-rules create "${MASTER_NAME}-https" \
-    --project "${PROJECT}" \
+    --project "${NETWORK_PROJECT}" \
     --network "${NETWORK}" \
     --target-tags "${MASTER_TAG}" \
     --allow tcp:443 &
@@ -1010,9 +1085,9 @@ function create-master() {
   fi
 
   # Create rule for accessing and securing etcd servers.
-  if ! gcloud compute firewall-rules --project "${PROJECT}" describe "${MASTER_NAME}-etcd" &>/dev/null; then
+  if ! gcloud compute firewall-rules --project "${NETWORK_PROJECT}" describe "${MASTER_NAME}-etcd" &>/dev/null; then
     gcloud compute firewall-rules create "${MASTER_NAME}-etcd" \
-      --project "${PROJECT}" \
+      --project "${NETWORK_PROJECT}" \
       --network "${NETWORK}" \
       --source-tags "${MASTER_TAG}" \
       --allow "tcp:2380,tcp:2381" \
@@ -1085,7 +1160,7 @@ function add-replica-to-etcd() {
 function set-existing-master() {
   local existing_master=$(gcloud compute instances list \
     --project "${PROJECT}" \
-    --regexp "$(get-replica-name-regexp)" \
+    --filter "name ~ '$(get-replica-name-regexp)'" \
     --format "value(name,zone)" | head -n1)
   EXISTING_MASTER_NAME="$(echo "${existing_master}" | cut -f1)"
   EXISTING_MASTER_ZONE="$(echo "${existing_master}" | cut -f2)"
@@ -1307,25 +1382,37 @@ function create-nodes() {
 # Assumes:
 # - NODE_INSTANCE_PREFIX
 # - PROJECT
+# - NETWORK_PROJECT
+# - REGION
 # - ZONE
 # - HEAPSTER_MACHINE_TYPE
 # - NODE_DISK_TYPE
 # - NODE_DISK_SIZE
 # - NODE_IMAGE_PROJECT
 # - NODE_IMAGE
+# - NODE_SERVICE_ACCOUNT
 # - NODE_TAG
 # - NETWORK
 # - ENABLE_IP_ALIASES
-# - IP_ALIAS_SUBNETWORK
+# - SUBNETWORK
 # - IP_ALIAS_SIZE
 function create-heapster-node() {
+  local gcloud="gcloud"
+
+  if [[ "${ENABLE_IP_ALIASES:-}" == 'true' ]]; then
+    gcloud="gcloud beta"
+  fi
+
   local network=$(make-gcloud-network-argument \
-      "${NETWORK}" "" \
+      "${NETWORK_PROJECT}" \
+      "${REGION}" \
+      "${NETWORK}" \
+      "${SUBNETWORK:-}" \
+      "" \
       "${ENABLE_IP_ALIASES:-}" \
-      "${IP_ALIAS_SUBNETWORK:-}" \
       "${IP_ALIAS_SIZE:-}")
 
-  gcloud compute instances \
+  ${gcloud} compute instances \
       create "${NODE_INSTANCE_PREFIX}-heapster" \
       --project "${PROJECT}" \
       --zone "${ZONE}" \
@@ -1334,6 +1421,7 @@ function create-heapster-node() {
       --boot-disk-size "${NODE_DISK_SIZE}" \
       --image-project="${NODE_IMAGE_PROJECT}" \
       --image "${NODE_IMAGE}" \
+      --service-account "${NODE_SERVICE_ACCOUNT}" \
       --tags "${NODE_TAG}" \
       ${network} \
       $(get-scope-flags) \
@@ -1427,14 +1515,20 @@ function check-cluster() {
   fi
 
   local start_time=$(date +%s)
+  local curl_out=$(mktemp)
+  kube::util::trap_add "rm -f ${curl_out}" EXIT
   until curl --cacert "${CERT_DIR}/pki/ca.crt" \
           -H "Authorization: Bearer ${KUBE_BEARER_TOKEN}" \
           ${secure} \
-          --max-time 5 --fail --output /dev/null --silent \
-          "https://${KUBE_MASTER_IP}/api/v1/pods"; do
+          --max-time 5 --fail \
+          "https://${KUBE_MASTER_IP}/api/v1/pods?limit=100" > "${curl_out}" 2>&1; do
       local elapsed=$(($(date +%s) - ${start_time}))
       if [[ ${elapsed} -gt ${KUBE_CLUSTER_INITIALIZATION_TIMEOUT} ]]; then
           echo -e "${color_red}Cluster failed to initialize within ${KUBE_CLUSTER_INITIALIZATION_TIMEOUT} seconds.${color_norm}" >&2
+          echo "Last output from querying API server follows:" >&2
+          echo "-----------------------------------------------------" >&2
+          cat "${curl_out}" >&2
+          echo "-----------------------------------------------------" >&2
           exit 2
       fi
       printf "."
@@ -1452,8 +1546,6 @@ function check-cluster() {
 
    # Update the user's kubeconfig to include credentials for this apiserver.
    create-kubeconfig
-
-   create-kubeconfig-for-federation
   )
 
   # ensures KUBECONFIG is set
@@ -1605,7 +1697,7 @@ function kube-down() {
   # Check if this are any remaining master replicas.
   local REMAINING_MASTER_COUNT=$(gcloud compute instances list \
     --project "${PROJECT}" \
-    --regexp "$(get-replica-name-regexp)" \
+    --filter="name ~ '$(get-replica-name-regexp)'" \
     --format "value(zone)" | wc -l)
 
   # In the replicated scenario, if there's only a single master left, we should also delete load balancer in front of it.
@@ -1647,8 +1739,8 @@ function kube-down() {
     # Find out what minions are running.
     local -a minions
     minions=( $(gcloud compute instances list \
-                  --project "${PROJECT}" --zones "${ZONE}" \
-                  --regexp "${NODE_INSTANCE_PREFIX}-.+" \
+                  --project "${PROJECT}" \
+                  --filter="name ~ '${NODE_INSTANCE_PREFIX}-.+' AND zone:(${ZONE})" \
                   --format='value(name)') )
     # If any minions are running, delete them in batches.
     while (( "${#minions[@]}" > 0 )); do
@@ -1673,13 +1765,13 @@ function kube-down() {
     # Note that this is currently a noop, as synchronously deleting the node MIG
     # first allows the master to cleanup routes itself.
     local TRUNCATED_PREFIX="${INSTANCE_PREFIX:0:26}"
-    routes=( $(gcloud compute routes list --project "${PROJECT}" \
-      --regexp "${TRUNCATED_PREFIX}-.{8}-.{4}-.{4}-.{4}-.{12}"  \
+    routes=( $(gcloud compute routes list --project "${NETWORK_PROJECT}" \
+      --filter="name ~ '${TRUNCATED_PREFIX}-.{8}-.{4}-.{4}-.{4}-.{12}'" \
       --format='value(name)') )
     while (( "${#routes[@]}" > 0 )); do
       echo Deleting routes "${routes[*]::${batch}}"
       gcloud compute routes delete \
-        --project "${PROJECT}" \
+        --project "${NETWORK_PROJECT}" \
         --quiet \
         "${routes[@]::${batch}}"
       routes=( "${routes[@]:${batch}}" )
@@ -1702,8 +1794,10 @@ function kube-down() {
       "${NETWORK}-default-internal"  # Pre-1.5 clusters
 
     if [[ "${KUBE_DELETE_NETWORK}" == "true" ]]; then
+      # Delete all remaining firewall rules in the network.
+      delete-all-firewall-rules || true
       delete-subnetworks || true
-      delete-network || true  # might fail if there are leaked firewall rules
+      delete-network || true  # might fail if there are leaked resources that reference the network
     fi
 
     # If there are no more remaining master replicas, we should update kubeconfig.
@@ -1740,8 +1834,7 @@ function kube-down() {
 function get-replica-name() {
   echo $(gcloud compute instances list \
     --project "${PROJECT}" \
-    --zones "${ZONE}" \
-    --regexp "$(get-replica-name-regexp)" \
+    --filter="name ~ '$(get-replica-name-regexp)' AND zone:(${ZONE})" \
     --format "value(name)" | head -n1)
 }
 
@@ -1755,7 +1848,7 @@ function get-replica-name() {
 function get-all-replica-names() {
   echo $(gcloud compute instances list \
     --project "${PROJECT}" \
-    --regexp "$(get-replica-name-regexp)" \
+    --filter="name ~ '$(get-replica-name-regexp)'" \
     --format "value(name)" | tr "\n" "," | sed 's/,$//')
 }
 
@@ -1767,7 +1860,7 @@ function get-master-replicas-count() {
   detect-project
   local num_masters=$(gcloud compute instances list \
     --project "${PROJECT}" \
-    --regexp "$(get-replica-name-regexp)" \
+    --filter="name ~ '$(get-replica-name-regexp)'" \
     --format "value(zone)" | wc -l)
   echo -n "${num_masters}"
 }
@@ -1775,7 +1868,7 @@ function get-master-replicas-count() {
 # Prints regexp for full master machine name. In a cluster with replicated master,
 # VM names may either be MASTER_NAME or MASTER_NAME with a suffix for a replica.
 function get-replica-name-regexp() {
-  echo "${MASTER_NAME}(-...)?"
+  echo "^${MASTER_NAME}(-...)?"
 }
 
 # Sets REPLICA_NAME to a unique name for a master replica that will match
@@ -1791,7 +1884,7 @@ function get-replica-name-regexp() {
 function set-replica-name() {
   local instances=$(gcloud compute instances list \
     --project "${PROJECT}" \
-    --regexp "$(get-replica-name-regexp)" \
+    --filter="name ~ '$(get-replica-name-regexp)'" \
     --format "value(name)")
 
   suffix=""
@@ -1808,7 +1901,8 @@ function set-replica-name() {
 #
 # $1: project
 function get-template() {
-  gcloud compute instance-templates list -r "${NODE_INSTANCE_PREFIX}-template(-(${KUBE_RELEASE_VERSION_DASHED_REGEX}|${KUBE_CI_VERSION_DASHED_REGEX}))?" \
+  gcloud compute instance-templates list \
+    --filter="name ~ '${NODE_INSTANCE_PREFIX}-template(-(${KUBE_RELEASE_VERSION_DASHED_REGEX}|${KUBE_CI_VERSION_DASHED_REGEX}))?'" \
     --project="${1}" --format='value(name)'
 }
 
@@ -1856,27 +1950,27 @@ function check-resources() {
   # Find out what minions are running.
   local -a minions
   minions=( $(gcloud compute instances list \
-                --project "${PROJECT}" --zones "${ZONE}" \
-                --regexp "${NODE_INSTANCE_PREFIX}-.+" \
+                --project "${PROJECT}" \
+                --filter="name ~ '${NODE_INSTANCE_PREFIX}-.+' AND zone:(${ZONE})" \
                 --format='value(name)') )
   if (( "${#minions[@]}" > 0 )); then
     KUBE_RESOURCE_FOUND="${#minions[@]} matching matching ${NODE_INSTANCE_PREFIX}-.+"
     return 1
   fi
 
-  if gcloud compute firewall-rules describe --project "${PROJECT}" "${MASTER_NAME}-https" &>/dev/null; then
+  if gcloud compute firewall-rules describe --project "${NETWORK_PROJECT}" "${MASTER_NAME}-https" &>/dev/null; then
     KUBE_RESOURCE_FOUND="Firewall rules for ${MASTER_NAME}-https"
     return 1
   fi
 
-  if gcloud compute firewall-rules describe --project "${PROJECT}" "${NODE_TAG}-all" &>/dev/null; then
+  if gcloud compute firewall-rules describe --project "${NETWORK_PROJECT}" "${NODE_TAG}-all" &>/dev/null; then
     KUBE_RESOURCE_FOUND="Firewall rules for ${MASTER_NAME}-all"
     return 1
   fi
 
   local -a routes
-  routes=( $(gcloud compute routes list --project "${PROJECT}" \
-    --regexp "${INSTANCE_PREFIX}-minion-.{4}" --format='value(name)') )
+  routes=( $(gcloud compute routes list --project "${NETWORK_PROJECT}" \
+    --filter="name ~ '${INSTANCE_PREFIX}-minion-.{4}'" --format='value(name)') )
   if (( "${#routes[@]}" > 0 )); then
     KUBE_RESOURCE_FOUND="${#routes[@]} routes matching ${INSTANCE_PREFIX}-minion-.{4}"
     return 1
@@ -1960,66 +2054,6 @@ function prepare-push() {
   fi
 }
 
-# Push binaries to kubernetes master
-function push-master() {
-  echo "Updating master metadata ..."
-  write-master-env
-  prepare-startup-script
-  add-instance-metadata-from-file "${KUBE_MASTER}" "kube-env=${KUBE_TEMP}/master-kube-env.yaml" "startup-script=${KUBE_TEMP}/configure-vm.sh"
-
-  echo "Pushing to master (log at ${OUTPUT}/push-${KUBE_MASTER}.log) ..."
-  cat ${KUBE_TEMP}/configure-vm.sh | gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --project "${PROJECT}" --zone "${ZONE}" "${KUBE_MASTER}" --command "sudo bash -s -- --push" &> ${OUTPUT}/push-"${KUBE_MASTER}".log
-}
-
-# Push binaries to kubernetes node
-function push-node() {
-  node=${1}
-
-  echo "Updating node ${node} metadata... "
-  prepare-startup-script
-  add-instance-metadata-from-file "${node}" "kube-env=${KUBE_TEMP}/node-kube-env.yaml" "startup-script=${KUBE_TEMP}/configure-vm.sh"
-
-  echo "Start upgrading node ${node} (log at ${OUTPUT}/push-${node}.log) ..."
-  cat ${KUBE_TEMP}/configure-vm.sh | gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --project "${PROJECT}" --zone "${ZONE}" "${node}" --command "sudo bash -s -- --push" &> ${OUTPUT}/push-"${node}".log
-}
-
-# Push binaries to kubernetes cluster
-function kube-push() {
-  # Disable this until it's fixed.
-  # See https://github.com/kubernetes/kubernetes/issues/17397
-  echo "./cluster/kube-push.sh is currently not supported in GCE."
-  echo "Please use ./cluster/gce/upgrade.sh."
-  exit 1
-
-  prepare-push true
-
-  push-master
-
-  for (( i=0; i<${#NODE_NAMES[@]}; i++)); do
-    push-node "${NODE_NAMES[$i]}" &
-  done
-
-  kube::util::wait-for-jobs || {
-    echo -e "${color_red}Some commands failed.${color_norm}" >&2
-  }
-
-  # TODO(zmerlynn): Re-create instance-template with the new
-  # node-kube-env. This isn't important until the node-ip-range issue
-  # is solved (because that's blocking automatic dynamic nodes from
-  # working). The node-kube-env has to be composed with the KUBELET_TOKEN
-  # and KUBE_PROXY_TOKEN.  Ideally we would have
-  # http://issue.k8s.io/3168
-  # implemented before then, though, so avoiding this mess until then.
-
-  echo
-  echo "Kubernetes cluster is running.  The master is running at:"
-  echo
-  echo "  https://${KUBE_MASTER_IP}"
-  echo
-  echo "The user name and password to use is located in ~/.kube/config"
-  echo
-}
-
 # -----------------------------------------------------------------------------
 # Cluster specific test helpers used from hack/e2e.go
 
@@ -2054,16 +2088,16 @@ function test-setup() {
   # TODO(roberthbailey): Remove this once we are no longer relying on hostPorts.
   local start=`date +%s`
   gcloud compute firewall-rules create \
-    --project "${PROJECT}" \
+    --project "${NETWORK_PROJECT}" \
     --target-tags "${NODE_TAG}" \
     --allow tcp:80,tcp:8080 \
     --network "${NETWORK}" \
     "${NODE_TAG}-${INSTANCE_PREFIX}-http-alt" 2> /dev/null || true
   # As there is no simple way to wait longer for this operation we need to manually
   # wait some additional time (20 minutes altogether).
-  while ! gcloud compute firewall-rules describe --project "${PROJECT}" "${NODE_TAG}-${INSTANCE_PREFIX}-http-alt" 2> /dev/null; do
+  while ! gcloud compute firewall-rules describe --project "${NETWORK_PROJECT}" "${NODE_TAG}-${INSTANCE_PREFIX}-http-alt" 2> /dev/null; do
     if [[ $(($start + 1200)) -lt `date +%s` ]]; then
-      echo -e "${color_red}Failed to create firewall ${NODE_TAG}-${INSTANCE_PREFIX}-http-alt in ${PROJECT}" >&2
+      echo -e "${color_red}Failed to create firewall ${NODE_TAG}-${INSTANCE_PREFIX}-http-alt in ${NETWORK_PROJECT}" >&2
       exit 1
     fi
     sleep 5
@@ -2073,14 +2107,14 @@ function test-setup() {
   # TODO(justinsb): Move to main setup, if we decide whether we want to do this by default.
   start=`date +%s`
   gcloud compute firewall-rules create \
-    --project "${PROJECT}" \
+    --project "${NETWORK_PROJECT}" \
     --target-tags "${NODE_TAG}" \
     --allow tcp:30000-32767,udp:30000-32767 \
     --network "${NETWORK}" \
     "${NODE_TAG}-${INSTANCE_PREFIX}-nodeports" 2> /dev/null || true
   # As there is no simple way to wait longer for this operation we need to manually
   # wait some additional time (20 minutes altogether).
-  while ! gcloud compute firewall-rules describe --project "${PROJECT}" "${NODE_TAG}-${INSTANCE_PREFIX}-nodeports" 2> /dev/null; do
+  while ! gcloud compute firewall-rules describe --project "${NETWORK_PROJECT}" "${NODE_TAG}-${INSTANCE_PREFIX}-nodeports" 2> /dev/null; do
     if [[ $(($start + 1200)) -lt `date +%s` ]]; then
       echo -e "${color_red}Failed to create firewall ${NODE_TAG}-${INSTANCE_PREFIX}-nodeports in ${PROJECT}" >&2
       exit 1
@@ -2127,20 +2161,4 @@ function ssh-to-node() {
 # Perform preparations required to run e2e tests
 function prepare-e2e() {
   detect-project
-}
-
-# Writes configure-vm.sh to a temporary location with comments stripped. GCE
-# limits the size of metadata fields to 32K, and stripping comments is the
-# easiest way to buy us a little more room.
-function prepare-startup-script() {
-  # Find a standard sed instance (and ensure that the command works as expected on a Mac).
-  SED=sed
-  if which gsed &>/dev/null; then
-    SED=gsed
-  fi
-  if ! ($SED --version 2>&1 | grep -q GNU); then
-    echo "!!! GNU sed is required.  If on OS X, use 'brew install gnu-sed'."
-    exit 1
-  fi
-  $SED '/^\s*#\([^!].*\)*$/ d' ${KUBE_ROOT}/cluster/gce/configure-vm.sh > ${KUBE_TEMP}/configure-vm.sh
 }

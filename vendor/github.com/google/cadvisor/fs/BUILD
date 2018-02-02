@@ -5,17 +5,19 @@ go_library(
     srcs = [
         "types.go",
     ] + select({
-        "@io_bazel_rules_go//go/platform:linux_amd64": [
+        "@io_bazel_rules_go//go/platform:linux": [
             "fs.go",
         ],
         "//conditions:default": [],
     }),
+    importpath = "github.com/google/cadvisor/fs",
     visibility = ["//visibility:public"],
     deps = select({
-        "@io_bazel_rules_go//go/platform:linux_amd64": [
+        "@io_bazel_rules_go//go/platform:linux": [
             "//vendor/github.com/docker/docker/pkg/mount:go_default_library",
             "//vendor/github.com/golang/glog:go_default_library",
             "//vendor/github.com/google/cadvisor/devicemapper:go_default_library",
+            "//vendor/github.com/google/cadvisor/utils:go_default_library",
             "//vendor/github.com/google/cadvisor/utils/docker:go_default_library",
             "//vendor/github.com/mistifyio/go-zfs:go_default_library",
         ],

@@ -26,15 +26,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	kubeadmapiext "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1alpha1"
+	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/features"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/uploadconfig"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 	configutil "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 )
 
+// NewCmdConfig returns cobra.Command for "kubeadm config" command
 func NewCmdConfig(out io.Writer) *cobra.Command {
 
 	var kubeConfigFile string
@@ -43,19 +45,19 @@ func NewCmdConfig(out io.Writer) *cobra.Command {
 		Short: "Manage configuration for a kubeadm cluster persisted in a ConfigMap in the cluster.",
 		Long: fmt.Sprintf(dedent.Dedent(`
 			There is a ConfigMap in the %s namespace called %q that kubeadm uses to store internal configuration about the
-			cluster. kubeadm CLI v1.8.0+ automatically creates this ConfigMap with used config on 'kubeadm init', but if you
+			cluster. kubeadm CLI v1.8.0+ automatically creates this ConfigMap with the config used with 'kubeadm init', but if you
 			initialized your cluster using kubeadm v1.7.x or lower, you must use the 'config upload' command to create this
-			ConfigMap in order for 'kubeadm upgrade' to be able to configure your upgraded cluster correctly.
+			ConfigMap. This is required so that 'kubeadm upgrade' can configure your upgraded cluster correctly.
 		`), metav1.NamespaceSystem, constants.MasterConfigurationConfigMap),
 		// Without this callback, if a user runs just the "upload"
 		// command without a subcommand, or with an invalid subcommand,
 		// cobra will print usage information, but still exit cleanly.
 		// We want to return an error code in these cases so that the
 		// user knows that their command was invalid.
-		RunE: subCmdRunE("config"),
+		RunE: cmdutil.SubCmdRunE("config"),
 	}
 
-	cmd.PersistentFlags().StringVar(&kubeConfigFile, "kubeconfig", "/etc/kubernetes/admin.conf", "The KubeConfig file to use for talking to the cluster")
+	cmd.PersistentFlags().StringVar(&kubeConfigFile, "kubeconfig", "/etc/kubernetes/admin.conf", "The KubeConfig file to use when talking to the cluster.")
 
 	cmd.AddCommand(NewCmdConfigUpload(out, &kubeConfigFile))
 	cmd.AddCommand(NewCmdConfigView(out, &kubeConfigFile))
@@ -63,11 +65,12 @@ func NewCmdConfig(out io.Writer) *cobra.Command {
 	return cmd
 }
 
+// NewCmdConfigUpload returns cobra.Command for "kubeadm config upload" command
 func NewCmdConfigUpload(out io.Writer, kubeConfigFile *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upload",
-		Short: "Upload configuration about the current state so 'kubeadm upgrade' later can know how to configure the upgraded cluster",
-		RunE:  subCmdRunE("upload"),
+		Short: "Upload configuration about the current state, so that 'kubeadm upgrade' can later know how to configure the upgraded cluster.",
+		RunE:  cmdutil.SubCmdRunE("upload"),
 	}
 
 	cmd.AddCommand(NewCmdConfigUploadFromFile(out, kubeConfigFile))
@@ -75,14 +78,15 @@ func NewCmdConfigUpload(out io.Writer, kubeConfigFile *string) *cobra.Command {
 	return cmd
 }
 
+// NewCmdConfigView returns cobra.Command for "kubeadm config view" command
 func NewCmdConfigView(out io.Writer, kubeConfigFile *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "view",
-		Short: "View the kubeadm configuration stored inside the cluster",
+		Short: "View the kubeadm configuration stored inside the cluster.",
 		Long: fmt.Sprintf(dedent.Dedent(`
-			Using this command, you can view the ConfigMap in the cluster where the configuration for kubeadm is located
+			Using this command, you can view the ConfigMap in the cluster where the configuration for kubeadm is located.
 
-			The configuration is located in the %q namespace in the %q ConfigMap
+			The configuration is located in the %q namespace in the %q ConfigMap.
 		`), metav1.NamespaceSystem, constants.MasterConfigurationConfigMap),
 		Run: func(cmd *cobra.Command, args []string) {
 			client, err := kubeconfigutil.ClientSetFromFile(*kubeConfigFile)
@@ -94,17 +98,19 @@ func NewCmdConfigView(out io.Writer, kubeConfigFile *string) *cobra.Command {
 	}
 }
 
+// NewCmdConfigUploadFromFile verifies given kubernetes config file and returns cobra.Command for
+// "kubeadm config upload from-file" command
 func NewCmdConfigUploadFromFile(out io.Writer, kubeConfigFile *string) *cobra.Command {
 	var cfgPath string
 	cmd := &cobra.Command{
 		Use:   "from-file",
-		Short: "Upload a configuration file to the in-cluster ConfigMap for kubeadm configuration",
+		Short: "Upload a configuration file to the in-cluster ConfigMap for kubeadm configuration.",
 		Long: fmt.Sprintf(dedent.Dedent(`
-			Using from-file, you can upload configuration to the ConfigMap in the cluster using the same config file you gave to kubeadm init.
-			If you initialized your cluster using a v1.7.x or lower kubeadm client and used the --config option; you need to run this command with the
+			Using this command, you can upload configuration to the ConfigMap in the cluster using the same config file you gave to 'kubeadm init'.
+			If you initialized your cluster using a v1.7.x or lower kubeadm client and used the --config option, you need to run this command with the
 			same config file before upgrading to v1.8 using 'kubeadm upgrade'.
 
-			The configuration is located in the %q namespace in the %q ConfigMap
+			The configuration is located in the %q namespace in the %q ConfigMap.
 		`), metav1.NamespaceSystem, constants.MasterConfigurationConfigMap),
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(cfgPath) == 0 {
@@ -121,27 +127,30 @@ func NewCmdConfigUploadFromFile(out io.Writer, kubeConfigFile *string) *cobra.Co
 			kubeadmutil.CheckErr(err)
 		},
 	}
-	cmd.Flags().StringVar(&cfgPath, "config", "", "Path to kubeadm config file (WARNING: Usage of a configuration file is experimental)")
+	cmd.Flags().StringVar(&cfgPath, "config", "", "Path to a kubeadm config file. WARNING: Usage of a configuration file is experimental.")
 	return cmd
 }
 
+// NewCmdConfigUploadFromFlags returns cobra.Command for "kubeadm config upload from-flags" command
 func NewCmdConfigUploadFromFlags(out io.Writer, kubeConfigFile *string) *cobra.Command {
 	cfg := &kubeadmapiext.MasterConfiguration{}
-	api.Scheme.Default(cfg)
+	legacyscheme.Scheme.Default(cfg)
 
-	var featureFlagsString string
+	var featureGatesString string
 
 	cmd := &cobra.Command{
 		Use:   "from-flags",
-		Short: "Create the in-cluster configuration file for the first time from using flags",
+		Short: "Create the in-cluster configuration file for the first time from using flags.",
 		Long: fmt.Sprintf(dedent.Dedent(`
-			Using from-flags, you can upload configuration to the ConfigMap in the cluster using the same flags you'd give to kubeadm init.
-			If you initialized your cluster using a v1.7.x or lower kubeadm client and set some flag; you need to run this command with the
+			Using this command, you can upload configuration to the ConfigMap in the cluster using the same flags you gave to 'kubeadm init'.
+			If you initialized your cluster using a v1.7.x or lower kubeadm client and set certain flags, you need to run this command with the
 			same flags before upgrading to v1.8 using 'kubeadm upgrade'.
+
+			The configuration is located in the %q namespace in the %q ConfigMap.
 		`), metav1.NamespaceSystem, constants.MasterConfigurationConfigMap),
 		Run: func(cmd *cobra.Command, args []string) {
 			var err error
-			if cfg.FeatureFlags, err = features.NewFeatureGate(&features.InitFeatureGates, featureFlagsString); err != nil {
+			if cfg.FeatureGates, err = features.NewFeatureGate(&features.InitFeatureGates, featureGatesString); err != nil {
 				kubeadmutil.CheckErr(err)
 			}
 
@@ -154,7 +163,7 @@ func NewCmdConfigUploadFromFlags(out io.Writer, kubeConfigFile *string) *cobra.C
 			kubeadmutil.CheckErr(err)
 		},
 	}
-	AddInitConfigFlags(cmd.PersistentFlags(), cfg, &featureFlagsString)
+	AddInitConfigFlags(cmd.PersistentFlags(), cfg, &featureGatesString)
 	return cmd
 }
 

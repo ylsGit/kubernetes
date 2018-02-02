@@ -7,6 +7,7 @@ go_library(
         "timed_store.go",
         "utils.go",
     ],
+    importpath = "github.com/google/cadvisor/utils",
     visibility = ["//visibility:public"],
 )
 
@@ -27,7 +28,6 @@ filegroup(
         "//vendor/github.com/google/cadvisor/utils/oomparser:all-srcs",
         "//vendor/github.com/google/cadvisor/utils/sysfs:all-srcs",
         "//vendor/github.com/google/cadvisor/utils/sysinfo:all-srcs",
-        "//vendor/github.com/google/cadvisor/utils/tail:all-srcs",
     ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],

@@ -21,8 +21,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/storage/names"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	"k8s.io/kubernetes/pkg/api/pod"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
 // podTemplateStrategy implements behavior for PodTemplates
@@ -33,7 +35,7 @@ type podTemplateStrategy struct {
 
 // Strategy is the default logic that applies when creating and updating PodTemplate
 // objects via the REST API.
-var Strategy = podTemplateStrategy{api.Scheme, names.SimpleNameGenerator}
+var Strategy = podTemplateStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 // NamespaceScoped is true for pod templates.
 func (podTemplateStrategy) NamespaceScoped() bool {
@@ -42,7 +44,9 @@ func (podTemplateStrategy) NamespaceScoped() bool {
 
 // PrepareForCreate clears fields that are not allowed to be set by end users on creation.
 func (podTemplateStrategy) PrepareForCreate(ctx genericapirequest.Context, obj runtime.Object) {
-	_ = obj.(*api.PodTemplate)
+	template := obj.(*api.PodTemplate)
+
+	pod.DropDisabledAlphaFields(&template.Template.Spec)
 }
 
 // Validate validates a new pod template.
@@ -62,7 +66,11 @@ func (podTemplateStrategy) AllowCreateOnUpdate() bool {
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
 func (podTemplateStrategy) PrepareForUpdate(ctx genericapirequest.Context, obj, old runtime.Object) {
-	_ = obj.(*api.PodTemplate)
+	newTemplate := obj.(*api.PodTemplate)
+	oldTemplate := old.(*api.PodTemplate)
+
+	pod.DropDisabledAlphaFields(&newTemplate.Template.Spec)
+	pod.DropDisabledAlphaFields(&oldTemplate.Template.Spec)
 }
 
 // ValidateUpdate is the default update validation for an end user.

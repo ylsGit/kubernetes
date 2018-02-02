@@ -21,7 +21,6 @@ import (
 
 	"k8s.io/api/core/v1"
 	errorsutil "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/util/retry"
@@ -31,8 +30,7 @@ import (
 //       see https://github.com/kubernetes/kubernetes/issues/21479
 type updatePodFunc func(pod *v1.Pod) error
 
-// UpdatePodWithRetries updates a pod with given applyUpdate function. Note that pod not found error is ignored.
-// The returned bool value can be used to tell if the pod is actually updated.
+// UpdatePodWithRetries updates a pod with given applyUpdate function.
 func UpdatePodWithRetries(podClient v1core.PodInterface, podLister corelisters.PodLister, namespace, name string, applyUpdate updatePodFunc) (*v1.Pod, error) {
 	var pod *v1.Pod
 
@@ -42,11 +40,7 @@ func UpdatePodWithRetries(podClient v1core.PodInterface, podLister corelisters.P
 		if err != nil {
 			return err
 		}
-		obj, deepCopyErr := scheme.Scheme.DeepCopy(pod)
-		if deepCopyErr != nil {
-			return deepCopyErr
-		}
-		pod = obj.(*v1.Pod)
+		pod = pod.DeepCopy()
 		// Apply the update, then attempt to push it to the apiserver.
 		if applyErr := applyUpdate(pod); applyErr != nil {
 			return applyErr

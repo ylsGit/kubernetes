@@ -13,6 +13,7 @@ go_library(
         "pod_util.go",
         "replicaset_util.go",
     ],
+    importpath = "k8s.io/kubernetes/pkg/controller/deployment/util",
     deps = [
         "//pkg/apis/extensions:go_default_library",
         "//pkg/controller:go_default_library",
@@ -29,7 +30,6 @@ go_library(
         "//vendor/k8s.io/apimachinery/pkg/util/intstr:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/wait:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes:go_default_library",
-        "//vendor/k8s.io/client-go/kubernetes/scheme:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes/typed/core/v1:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes/typed/extensions/v1beta1:go_default_library",
         "//vendor/k8s.io/client-go/listers/core/v1:go_default_library",
@@ -45,9 +45,9 @@ go_test(
         "deployment_util_test.go",
         "hash_test.go",
     ],
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/pkg/controller/deployment/util",
     deps = [
-        "//pkg/api/v1:go_default_library",
         "//pkg/controller:go_default_library",
         "//pkg/util/hash:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
@@ -57,8 +57,8 @@ go_test(
         "//vendor/k8s.io/apimachinery/pkg/runtime:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/intstr:go_default_library",
+        "//vendor/k8s.io/apiserver/pkg/storage/names:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes/fake:go_default_library",
-        "//vendor/k8s.io/client-go/kubernetes/scheme:go_default_library",
         "//vendor/k8s.io/client-go/testing:go_default_library",
     ],
 )

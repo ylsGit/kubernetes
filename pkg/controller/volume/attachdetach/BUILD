@@ -9,6 +9,7 @@ load(
 go_library(
     name = "go_default_library",
     srcs = ["attach_detach_controller.go"],
+    importpath = "k8s.io/kubernetes/pkg/controller/volume/attachdetach",
     deps = [
         "//pkg/cloudprovider:go_default_library",
         "//pkg/controller:go_default_library",
@@ -20,6 +21,7 @@ go_library(
         "//pkg/util/io:go_default_library",
         "//pkg/util/mount:go_default_library",
         "//pkg/volume:go_default_library",
+        "//pkg/volume/util:go_default_library",
         "//pkg/volume/util/operationexecutor:go_default_library",
         "//pkg/volume/util/volumehelper:go_default_library",
         "//vendor/github.com/golang/glog:go_default_library",
@@ -40,11 +42,13 @@ go_library(
 go_test(
     name = "go_default_test",
     srcs = ["attach_detach_controller_test.go"],
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/pkg/controller/volume/attachdetach",
     deps = [
         "//pkg/controller:go_default_library",
         "//pkg/controller/volume/attachdetach/cache:go_default_library",
         "//pkg/controller/volume/attachdetach/testing:go_default_library",
+        "//pkg/volume:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/labels:go_default_library",

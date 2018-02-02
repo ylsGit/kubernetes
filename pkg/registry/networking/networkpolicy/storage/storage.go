@@ -21,9 +21,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/kubernetes/pkg/api"
 	networkingapi "k8s.io/kubernetes/pkg/apis/networking"
-	"k8s.io/kubernetes/pkg/registry/cachesize"
 	"k8s.io/kubernetes/pkg/registry/networking/networkpolicy"
 )
 
@@ -35,11 +33,9 @@ type REST struct {
 // NewREST returns a RESTStorage object that will work against NetworkPolicies
 func NewREST(optsGetter generic.RESTOptionsGetter) *REST {
 	store := &genericregistry.Store{
-		Copier:                   api.Scheme,
 		NewFunc:                  func() runtime.Object { return &networkingapi.NetworkPolicy{} },
 		NewListFunc:              func() runtime.Object { return &networkingapi.NetworkPolicyList{} },
 		DefaultQualifiedResource: networkingapi.Resource("networkpolicies"),
-		WatchCacheSize:           cachesize.GetWatchCacheSizeByResource("networkpolicies"),
 
 		CreateStrategy: networkpolicy.Strategy,
 		UpdateStrategy: networkpolicy.Strategy,

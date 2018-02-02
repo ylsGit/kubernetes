@@ -9,19 +9,25 @@ load(
 go_library(
     name = "go_default_library",
     srcs = [
+        "attacher.go",
         "disk_manager.go",
         "doc.go",
         "iscsi.go",
         "iscsi_util.go",
     ],
+    importpath = "k8s.io/kubernetes/pkg/volume/iscsi",
     deps = [
+        "//pkg/features:go_default_library",
         "//pkg/util/mount:go_default_library",
         "//pkg/util/strings:go_default_library",
         "//pkg/volume:go_default_library",
         "//pkg/volume/util:go_default_library",
+        "//pkg/volume/util/volumehelper:go_default_library",
         "//vendor/github.com/golang/glog:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
+        "//vendor/k8s.io/apiserver/pkg/util/feature:go_default_library",
     ],
 )
 
@@ -31,7 +37,8 @@ go_test(
         "iscsi_test.go",
         "iscsi_util_test.go",
     ],
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/pkg/volume/iscsi",
     deps = [
         "//pkg/util/mount:go_default_library",
         "//pkg/volume:go_default_library",

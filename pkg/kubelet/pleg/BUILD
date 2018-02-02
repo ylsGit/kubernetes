@@ -13,7 +13,9 @@ go_library(
         "generic.go",
         "pleg.go",
     ],
+    importpath = "k8s.io/kubernetes/pkg/kubelet/pleg",
     deps = [
+        "//pkg/kubelet/apis/cri/v1alpha1/runtime:go_default_library",
         "//pkg/kubelet/container:go_default_library",
         "//pkg/kubelet/metrics:go_default_library",
         "//vendor/github.com/golang/glog:go_default_library",
@@ -27,7 +29,8 @@ go_library(
 go_test(
     name = "go_default_test",
     srcs = ["generic_test.go"],
-    library = ":go_default_library",
+    embed = [":go_default_library"],
+    importpath = "k8s.io/kubernetes/pkg/kubelet/pleg",
     deps = [
         "//pkg/kubelet/container:go_default_library",
         "//pkg/kubelet/container/testing:go_default_library",

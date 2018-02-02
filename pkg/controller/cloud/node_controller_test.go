@@ -17,10 +17,9 @@ limitations under the License.
 package cloud
 
 import (
+	"errors"
 	"testing"
 	"time"
-
-	"github.com/golang/glog"
 
 	"k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -36,8 +35,118 @@ import (
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/testutil"
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
-	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
+	"k8s.io/kubernetes/pkg/scheduler/algorithm"
+
+	"github.com/golang/glog"
+	"github.com/stretchr/testify/assert"
 )
+
+func TestEnsureNodeExistsByProviderIDOrNodeName(t *testing.T) {
+
+	testCases := []struct {
+		testName           string
+		node               *v1.Node
+		expectedCalls      []string
+		existsByNodeName   bool
+		existsByProviderID bool
+		nodeNameErr        error
+		providerIDErr      error
+	}{
+		{
+			testName:           "node exists by provider id",
+			existsByProviderID: true,
+			providerIDErr:      nil,
+			existsByNodeName:   false,
+			nodeNameErr:        errors.New("unimplemented"),
+			expectedCalls:      []string{"instance-exists-by-provider-id"},
+			node: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node0",
+				},
+				Spec: v1.NodeSpec{
+					ProviderID: "node0",
+				},
+			},
+		},
+		{
+			testName:           "does not exist by provider id",
+			existsByProviderID: false,
+			providerIDErr:      nil,
+			existsByNodeName:   false,
+			nodeNameErr:        errors.New("unimplemented"),
+			expectedCalls:      []string{"instance-exists-by-provider-id"},
+			node: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node0",
+				},
+				Spec: v1.NodeSpec{
+					ProviderID: "node0",
+				},
+			},
+		},
+		{
+			testName:           "node exists by node name",
+			existsByProviderID: false,
+			providerIDErr:      errors.New("unimplemented"),
+			existsByNodeName:   true,
+			nodeNameErr:        nil,
+			expectedCalls:      []string{"instance-exists-by-provider-id", "external-id"},
+			node: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node0",
+				},
+				Spec: v1.NodeSpec{
+					ProviderID: "node0",
+				},
+			},
+		},
+		{
+			testName:           "does not exist by node name",
+			existsByProviderID: false,
+			providerIDErr:      errors.New("unimplemented"),
+			existsByNodeName:   false,
+			nodeNameErr:        cloudprovider.InstanceNotFound,
+			expectedCalls:      []string{"instance-exists-by-provider-id", "external-id"},
+			node: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node0",
+				},
+				Spec: v1.NodeSpec{
+					ProviderID: "node0",
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.testName, func(t *testing.T) {
+			fc := &fakecloud.FakeCloud{
+				Exists:             tc.existsByNodeName,
+				ExistsByProviderID: tc.existsByProviderID,
+				Err:                tc.nodeNameErr,
+				ErrByProviderID:    tc.providerIDErr,
+			}
+
+			instances, _ := fc.Instances()
+			exists, err := ensureNodeExistsByProviderIDOrExternalID(instances, tc.node)
+			assert.NoError(t, err)
+			assert.EqualValues(t, tc.expectedCalls, fc.Calls,
+				"expected cloud provider methods `%v` to be called but `%v` was called ",
+				tc.expectedCalls, fc.Calls)
+
+			assert.False(t, tc.existsByProviderID && tc.existsByProviderID != exists,
+				"expected exist by provider id to be `%t` but got `%t`",
+				tc.existsByProviderID, exists)
+
+			assert.False(t, tc.existsByNodeName && tc.existsByNodeName != exists,
+				"expected exist by node name to be `%t` but got `%t`", tc.existsByNodeName, exists)
+
+			assert.False(t, !tc.existsByNodeName && !tc.existsByProviderID && exists,
+				"node is not supposed to exist")
+		})
+	}
+
+}
 
 // This test checks that the node is deleted when kubelet stops reporting
 // and cloud provider says node is gone
@@ -105,11 +214,14 @@ func TestNodeDeleted(t *testing.T) {
 
 	eventBroadcaster := record.NewBroadcaster()
 	cloudNodeController := &CloudNodeController{
-		kubeClient:                fnh,
-		nodeInformer:              factory.Core().V1().Nodes(),
-		cloud:                     &fakecloud.FakeCloud{Err: cloudprovider.InstanceNotFound},
+		kubeClient:   fnh,
+		nodeInformer: factory.Core().V1().Nodes(),
+		cloud: &fakecloud.FakeCloud{
+			ExistsByProviderID: false,
+			Err:                nil,
+		},
 		nodeMonitorPeriod:         1 * time.Second,
-		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-controller-manager"}),
+		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
 		nodeStatusUpdateFrequency: 1 * time.Second,
 	}
 	eventBroadcaster.StartLogging(glog.Infof)
@@ -121,9 +233,9 @@ func TestNodeDeleted(t *testing.T) {
 	case <-time.After(wait.ForeverTestTimeout):
 		t.Errorf("Timed out waiting %v for node to be deleted", wait.ForeverTestTimeout)
 	}
-	if len(fnh.DeletedNodes) != 1 || fnh.DeletedNodes[0].Name != "node0" {
-		t.Errorf("Node was not deleted")
-	}
+
+	assert.Equal(t, 1, len(fnh.DeletedNodes), "Node was not deleted")
+	assert.Equal(t, "node0", fnh.DeletedNodes[0].Name, "Node was not deleted")
 }
 
 // This test checks that a node with the external cloud provider taint is cloudprovider initialized
@@ -189,21 +301,16 @@ func TestNodeInitialized(t *testing.T) {
 		nodeInformer:              factory.Core().V1().Nodes(),
 		cloud:                     fakeCloud,
 		nodeMonitorPeriod:         1 * time.Second,
-		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-controller-manager"}),
+		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
 		nodeStatusUpdateFrequency: 1 * time.Second,
 	}
 	eventBroadcaster.StartLogging(glog.Infof)
 
 	cloudNodeController.AddCloudNode(fnh.Existing[0])
 
-	if len(fnh.UpdatedNodes) != 1 || fnh.UpdatedNodes[0].Name != "node0" {
-		t.Errorf("Node was not updated")
-	}
-
-	if len(fnh.UpdatedNodes[0].Spec.Taints) != 0 {
-		t.Errorf("Node Taint was not removed after cloud init")
-	}
-
+	assert.Equal(t, 1, len(fnh.UpdatedNodes), "Node was not updated")
+	assert.Equal(t, "node0", fnh.UpdatedNodes[0].Name, "Node was not updated")
+	assert.Equal(t, 0, len(fnh.UpdatedNodes[0].Spec.Taints), "Node Taint was not removed after cloud init")
 }
 
 // This test checks that a node without the external cloud provider taint are NOT cloudprovider initialized
@@ -260,15 +367,12 @@ func TestNodeIgnored(t *testing.T) {
 		nodeInformer:      factory.Core().V1().Nodes(),
 		cloud:             fakeCloud,
 		nodeMonitorPeriod: 5 * time.Second,
-		recorder:          eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-controller-manager"}),
+		recorder:          eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
 	}
 	eventBroadcaster.StartLogging(glog.Infof)
 
 	cloudNodeController.AddCloudNode(fnh.Existing[0])
-
-	if len(fnh.UpdatedNodes) != 0 {
-		t.Errorf("Node was wrongly updated")
-	}
+	assert.Equal(t, 0, len(fnh.UpdatedNodes), "Node was wrongly updated")
 
 }
 
@@ -337,19 +441,15 @@ func TestGCECondition(t *testing.T) {
 		nodeInformer:      factory.Core().V1().Nodes(),
 		cloud:             fakeCloud,
 		nodeMonitorPeriod: 1 * time.Second,
-		recorder:          eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-controller-manager"}),
+		recorder:          eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
 	}
 	eventBroadcaster.StartLogging(glog.Infof)
 
 	cloudNodeController.AddCloudNode(fnh.Existing[0])
 
-	if len(fnh.UpdatedNodes) != 1 && fnh.UpdatedNodes[0].Name != "node0" {
-		t.Errorf("Node was not updated")
-	}
-
-	if len(fnh.UpdatedNodes[0].Status.Conditions) != 2 {
-		t.Errorf("No new conditions were added for GCE")
-	}
+	assert.Equal(t, 1, len(fnh.UpdatedNodes), "Node was not updated")
+	assert.Equal(t, "node0", fnh.UpdatedNodes[0].Name, "Node was not updated")
+	assert.Equal(t, 2, len(fnh.UpdatedNodes[0].Status.Conditions), "No new conditions were added for GCE")
 
 	conditionAdded := false
 	for _, cond := range fnh.UpdatedNodes[0].Status.Conditions {
@@ -358,9 +458,7 @@ func TestGCECondition(t *testing.T) {
 		}
 	}
 
-	if !conditionAdded {
-		t.Errorf("Network Route Condition for GCE not added by external cloud intializer")
-	}
+	assert.True(t, conditionAdded, "Network Route Condition for GCE not added by external cloud initializer")
 }
 
 // This test checks that a node with the external cloud provider taint is cloudprovider initialized and
@@ -433,27 +531,20 @@ func TestZoneInitialized(t *testing.T) {
 		nodeInformer:      factory.Core().V1().Nodes(),
 		cloud:             fakeCloud,
 		nodeMonitorPeriod: 5 * time.Second,
-		recorder:          eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-controller-manager"}),
+		recorder:          eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
 	}
 	eventBroadcaster.StartLogging(glog.Infof)
 
 	cloudNodeController.AddCloudNode(fnh.Existing[0])
 
-	if len(fnh.UpdatedNodes) != 1 && fnh.UpdatedNodes[0].Name != "node0" {
-		t.Errorf("Node was not updated")
-	}
-
-	if len(fnh.UpdatedNodes[0].ObjectMeta.Labels) != 2 {
-		t.Errorf("Node label for Region and Zone were not set")
-	}
-
-	if fnh.UpdatedNodes[0].ObjectMeta.Labels[kubeletapis.LabelZoneRegion] != "us-west" {
-		t.Errorf("Node Region not correctly updated")
-	}
-
-	if fnh.UpdatedNodes[0].ObjectMeta.Labels[kubeletapis.LabelZoneFailureDomain] != "us-west-1a" {
-		t.Errorf("Node FailureDomain not correctly updated")
-	}
+	assert.Equal(t, 1, len(fnh.UpdatedNodes), "Node was not updated")
+	assert.Equal(t, "node0", fnh.UpdatedNodes[0].Name, "Node was not updated")
+	assert.Equal(t, 2, len(fnh.UpdatedNodes[0].ObjectMeta.Labels),
+		"Node label for Region and Zone were not set")
+	assert.Equal(t, "us-west", fnh.UpdatedNodes[0].ObjectMeta.Labels[kubeletapis.LabelZoneRegion],
+		"Node Region not correctly updated")
+	assert.Equal(t, "us-west-1a", fnh.UpdatedNodes[0].ObjectMeta.Labels[kubeletapis.LabelZoneFailureDomain],
+		"Node FailureDomain not correctly updated")
 }
 
 // This test checks that a node with the external cloud provider taint is cloudprovider initialized and
@@ -520,7 +611,8 @@ func TestNodeAddresses(t *testing.T) {
 			FailureDomain: "us-west-1a",
 			Region:        "us-west",
 		},
-		Err: nil,
+		ExistsByProviderID: true,
+		Err:                nil,
 	}
 
 	eventBroadcaster := record.NewBroadcaster()
@@ -530,19 +622,15 @@ func TestNodeAddresses(t *testing.T) {
 		cloud:                     fakeCloud,
 		nodeMonitorPeriod:         5 * time.Second,
 		nodeStatusUpdateFrequency: 1 * time.Second,
-		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-controller-manager"}),
+		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
 	}
 	eventBroadcaster.StartLogging(glog.Infof)
 
 	cloudNodeController.AddCloudNode(fnh.Existing[0])
 
-	if len(fnh.UpdatedNodes) != 1 && fnh.UpdatedNodes[0].Name != "node0" {
-		t.Errorf("Node was not updated")
-	}
-
-	if len(fnh.UpdatedNodes[0].Status.Addresses) != 3 {
-		t.Errorf("Node status not updated")
-	}
+	assert.Equal(t, 1, len(fnh.UpdatedNodes), "Node was not updated")
+	assert.Equal(t, "node0", fnh.UpdatedNodes[0].Name, "Node was not updated")
+	assert.Equal(t, 3, len(fnh.UpdatedNodes[0].Status.Addresses), "Node status not updated")
 
 	fakeCloud.Addresses = []v1.NodeAddress{
 		{
@@ -561,9 +649,8 @@ func TestNodeAddresses(t *testing.T) {
 
 	updatedNodes := fnh.GetUpdatedNodesCopy()
 
-	if len(updatedNodes[0].Status.Addresses) != 2 {
-		t.Errorf("Node Addresses not correctly updated")
-	}
+	assert.Equal(t, 2, len(updatedNodes[0].Status.Addresses), "Node Addresses not correctly updated")
+
 }
 
 // This test checks that a node with the external cloud provider taint is cloudprovider initialized and
@@ -639,7 +726,8 @@ func TestNodeProvidedIPAddresses(t *testing.T) {
 			FailureDomain: "us-west-1a",
 			Region:        "us-west",
 		},
-		Err: nil,
+		ExistsByProviderID: true,
+		Err:                nil,
 	}
 
 	eventBroadcaster := record.NewBroadcaster()
@@ -649,19 +737,15 @@ func TestNodeProvidedIPAddresses(t *testing.T) {
 		cloud:                     fakeCloud,
 		nodeMonitorPeriod:         5 * time.Second,
 		nodeStatusUpdateFrequency: 1 * time.Second,
-		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-controller-manager"}),
+		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
 	}
 	eventBroadcaster.StartLogging(glog.Infof)
 
 	cloudNodeController.AddCloudNode(fnh.Existing[0])
 
-	if len(fnh.UpdatedNodes) != 1 && fnh.UpdatedNodes[0].Name != "node0" {
-		t.Errorf("Node was not updated")
-	}
-
-	if len(fnh.UpdatedNodes[0].Status.Addresses) != 1 {
-		t.Errorf("Node status unexpectedly updated")
-	}
+	assert.Equal(t, 1, len(fnh.UpdatedNodes), "Node was not updated")
+	assert.Equal(t, "node0", fnh.UpdatedNodes[0].Name, "Node was not updated")
+	assert.Equal(t, 1, len(fnh.UpdatedNodes[0].Status.Addresses), "Node status unexpectedly updated")
 
 	cloudNodeController.Run()
 
@@ -669,9 +753,8 @@ func TestNodeProvidedIPAddresses(t *testing.T) {
 
 	updatedNodes := fnh.GetUpdatedNodesCopy()
 
-	if len(updatedNodes[0].Status.Addresses) != 1 || updatedNodes[0].Status.Addresses[0].Address != "10.0.0.1" {
-		t.Errorf("Node Addresses not correctly updated")
-	}
+	assert.Equal(t, 1, len(updatedNodes[0].Status.Addresses), 1, "Node Addresses not correctly updated")
+	assert.Equal(t, "10.0.0.1", updatedNodes[0].Status.Addresses[0].Address, "Node Addresses not correctly updated")
 }
 
 // Tests that node address changes are detected correctly
@@ -696,9 +779,9 @@ func TestNodeAddressesChangeDetected(t *testing.T) {
 			Address: "132.143.154.163",
 		},
 	}
-	if nodeAddressesChangeDetected(addressSet1, addressSet2) {
-		t.Errorf("Node address changes are not detected correctly")
-	}
+
+	assert.False(t, nodeAddressesChangeDetected(addressSet1, addressSet2),
+		"Node address changes are not detected correctly")
 
 	addressSet1 = []v1.NodeAddress{
 		{
@@ -720,9 +803,9 @@ func TestNodeAddressesChangeDetected(t *testing.T) {
 			Address: "132.143.154.163",
 		},
 	}
-	if !nodeAddressesChangeDetected(addressSet1, addressSet2) {
-		t.Errorf("Node address changes are not detected correctly")
-	}
+
+	assert.True(t, nodeAddressesChangeDetected(addressSet1, addressSet2),
+		"Node address changes are not detected correctly")
 
 	addressSet1 = []v1.NodeAddress{
 		{
@@ -748,9 +831,9 @@ func TestNodeAddressesChangeDetected(t *testing.T) {
 			Address: "132.143.154.164",
 		},
 	}
-	if !nodeAddressesChangeDetected(addressSet1, addressSet2) {
-		t.Errorf("Node address changes are not detected correctly")
-	}
+
+	assert.True(t, nodeAddressesChangeDetected(addressSet1, addressSet2),
+		"Node address changes are not detected correctly")
 
 	addressSet1 = []v1.NodeAddress{
 		{
@@ -776,9 +859,9 @@ func TestNodeAddressesChangeDetected(t *testing.T) {
 			Address: "hostname.zone.region.aws.test",
 		},
 	}
-	if !nodeAddressesChangeDetected(addressSet1, addressSet2) {
-		t.Errorf("Node address changes are not detected correctly")
-	}
+
+	assert.True(t, nodeAddressesChangeDetected(addressSet1, addressSet2),
+		"Node address changes are not detected correctly")
 
 	addressSet1 = []v1.NodeAddress{
 		{
@@ -800,7 +883,244 @@ func TestNodeAddressesChangeDetected(t *testing.T) {
 			Address: "132.143.154.163",
 		},
 	}
-	if !nodeAddressesChangeDetected(addressSet1, addressSet2) {
-		t.Errorf("Node address changes are not detected correctly")
+
+	assert.True(t, nodeAddressesChangeDetected(addressSet1, addressSet2),
+		"Node address changes are not detected correctly")
+}
+
+// This test checks that a node with the external cloud provider taint is cloudprovider initialized and
+// and node addresses will not be updated when node isn't present according to the cloudprovider
+func TestNodeAddressesNotUpdate(t *testing.T) {
+	fnh := &testutil.FakeNodeHandler{
+		Existing: []*v1.Node{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node0",
+					CreationTimestamp: metav1.Date(2012, 1, 1, 0, 0, 0, 0, time.UTC),
+					Labels:            map[string]string{},
+				},
+				Status: v1.NodeStatus{
+					Conditions: []v1.NodeCondition{
+						{
+							Type:               v1.NodeReady,
+							Status:             v1.ConditionUnknown,
+							LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+						},
+					},
+				},
+				Spec: v1.NodeSpec{
+					Taints: []v1.Taint{
+						{
+							Key:    "ImproveCoverageTaint",
+							Value:  "true",
+							Effect: v1.TaintEffectNoSchedule,
+						},
+					},
+				},
+			},
+		},
 	}
+
+	factory := informers.NewSharedInformerFactory(fnh, controller.NoResyncPeriodFunc())
+
+	fakeCloud := &fakecloud.FakeCloud{
+		InstanceTypes: map[types.NodeName]string{},
+		Addresses: []v1.NodeAddress{
+			{
+				Type:    v1.NodeHostName,
+				Address: "node0.cloud.internal",
+			},
+			{
+				Type:    v1.NodeInternalIP,
+				Address: "10.0.0.1",
+			},
+			{
+				Type:    v1.NodeExternalIP,
+				Address: "132.143.154.163",
+			},
+		},
+		ExistsByProviderID: false,
+		Err:                nil,
+	}
+
+	cloudNodeController := &CloudNodeController{
+		kubeClient:   fnh,
+		nodeInformer: factory.Core().V1().Nodes(),
+		cloud:        fakeCloud,
+	}
+
+	cloudNodeController.updateNodeAddress(fnh.Existing[0], fakeCloud)
+
+	if len(fnh.UpdatedNodes) != 0 {
+		t.Errorf("Node was not correctly updated, the updated len(nodes) got: %v, wanted=0", len(fnh.UpdatedNodes))
+	}
+}
+
+// This test checks that a node is set with the correct providerID
+func TestNodeProviderID(t *testing.T) {
+	fnh := &testutil.FakeNodeHandler{
+		Existing: []*v1.Node{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node0",
+					CreationTimestamp: metav1.Date(2012, 1, 1, 0, 0, 0, 0, time.UTC),
+					Labels:            map[string]string{},
+				},
+				Status: v1.NodeStatus{
+					Conditions: []v1.NodeCondition{
+						{
+							Type:               v1.NodeReady,
+							Status:             v1.ConditionUnknown,
+							LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+						},
+					},
+				},
+				Spec: v1.NodeSpec{
+					Taints: []v1.Taint{
+						{
+							Key:    "ImproveCoverageTaint",
+							Value:  "true",
+							Effect: v1.TaintEffectNoSchedule,
+						},
+						{
+							Key:    algorithm.TaintExternalCloudProvider,
+							Value:  "true",
+							Effect: v1.TaintEffectNoSchedule,
+						},
+					},
+				},
+			},
+		},
+		Clientset:      fake.NewSimpleClientset(&v1.PodList{}),
+		DeleteWaitChan: make(chan struct{}),
+	}
+
+	factory := informers.NewSharedInformerFactory(fnh, controller.NoResyncPeriodFunc())
+
+	fakeCloud := &fakecloud.FakeCloud{
+		InstanceTypes: map[types.NodeName]string{},
+		Addresses: []v1.NodeAddress{
+			{
+				Type:    v1.NodeHostName,
+				Address: "node0.cloud.internal",
+			},
+			{
+				Type:    v1.NodeInternalIP,
+				Address: "10.0.0.1",
+			},
+			{
+				Type:    v1.NodeExternalIP,
+				Address: "132.143.154.163",
+			},
+		},
+		Provider: "test",
+		ExtID: map[types.NodeName]string{
+			types.NodeName("node0"): "12345",
+		},
+		Err: nil,
+	}
+
+	eventBroadcaster := record.NewBroadcaster()
+	cloudNodeController := &CloudNodeController{
+		kubeClient:                fnh,
+		nodeInformer:              factory.Core().V1().Nodes(),
+		cloud:                     fakeCloud,
+		nodeMonitorPeriod:         5 * time.Second,
+		nodeStatusUpdateFrequency: 1 * time.Second,
+		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
+	}
+	eventBroadcaster.StartLogging(glog.Infof)
+
+	cloudNodeController.AddCloudNode(fnh.Existing[0])
+
+	assert.Equal(t, 1, len(fnh.UpdatedNodes), "Node was not updated")
+	assert.Equal(t, "node0", fnh.UpdatedNodes[0].Name, "Node was not updated")
+	assert.Equal(t, "test://12345", fnh.UpdatedNodes[0].Spec.ProviderID, "Node ProviderID not set correctly")
+}
+
+// This test checks that a node's provider ID will not be overwritten
+func TestNodeProviderIDAlreadySet(t *testing.T) {
+	fnh := &testutil.FakeNodeHandler{
+		Existing: []*v1.Node{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node0",
+					CreationTimestamp: metav1.Date(2012, 1, 1, 0, 0, 0, 0, time.UTC),
+					Labels:            map[string]string{},
+				},
+				Status: v1.NodeStatus{
+					Conditions: []v1.NodeCondition{
+						{
+							Type:               v1.NodeReady,
+							Status:             v1.ConditionUnknown,
+							LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+						},
+					},
+				},
+				Spec: v1.NodeSpec{
+					ProviderID: "test-provider-id",
+					Taints: []v1.Taint{
+						{
+							Key:    "ImproveCoverageTaint",
+							Value:  "true",
+							Effect: v1.TaintEffectNoSchedule,
+						},
+						{
+							Key:    algorithm.TaintExternalCloudProvider,
+							Value:  "true",
+							Effect: v1.TaintEffectNoSchedule,
+						},
+					},
+				},
+			},
+		},
+		Clientset:      fake.NewSimpleClientset(&v1.PodList{}),
+		DeleteWaitChan: make(chan struct{}),
+	}
+
+	factory := informers.NewSharedInformerFactory(fnh, controller.NoResyncPeriodFunc())
+
+	fakeCloud := &fakecloud.FakeCloud{
+		InstanceTypes: map[types.NodeName]string{},
+		Addresses: []v1.NodeAddress{
+			{
+				Type:    v1.NodeHostName,
+				Address: "node0.cloud.internal",
+			},
+			{
+				Type:    v1.NodeInternalIP,
+				Address: "10.0.0.1",
+			},
+			{
+				Type:    v1.NodeExternalIP,
+				Address: "132.143.154.163",
+			},
+		},
+		Provider: "test",
+		ExtID: map[types.NodeName]string{
+			types.NodeName("node0"): "12345",
+		},
+		Err: nil,
+	}
+
+	eventBroadcaster := record.NewBroadcaster()
+	cloudNodeController := &CloudNodeController{
+		kubeClient:                fnh,
+		nodeInformer:              factory.Core().V1().Nodes(),
+		cloud:                     fakeCloud,
+		nodeMonitorPeriod:         5 * time.Second,
+		nodeStatusUpdateFrequency: 1 * time.Second,
+		recorder:                  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"}),
+	}
+	eventBroadcaster.StartLogging(glog.Infof)
+
+	cloudNodeController.AddCloudNode(fnh.Existing[0])
+
+	assert.Equal(t, 1, len(fnh.UpdatedNodes), "Node was not updated")
+	assert.Equal(t, "node0", fnh.UpdatedNodes[0].Name, "Node was not updated")
+	// CCM node controller should not overwrite provider if it's already set
+	assert.Equal(t, "test-provider-id", fnh.UpdatedNodes[0].Spec.ProviderID, "Node ProviderID not set correctly")
 }

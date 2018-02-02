@@ -19,12 +19,28 @@ package kubeletconfig
 import (
 	"fmt"
 	"os"
+	"time"
+
+	"github.com/golang/glog"
 
 	apiv1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	clientset "k8s.io/client-go/kubernetes"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/kubernetes/pkg/kubelet/kubeletconfig/checkpoint"
+	"k8s.io/kubernetes/pkg/kubelet/kubeletconfig/status"
 	utillog "k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/log"
+)
+
+const (
+	// KubeletConfigChangedEventReason identifies an event as a change of Kubelet configuration
+	KubeletConfigChangedEventReason = "KubeletConfigChanged"
+	// EventMessageFmt is the message format for Kubelet config change events
+	EventMessageFmt = "Kubelet will restart to use: %s"
+	// LocalConfigMessage is the text to apply to EventMessageFmt when the Kubelet has been configured to use its local config (init or defaults)
+	LocalConfigMessage = "local config"
 )
 
 // pokeConfiSourceWorker tells the worker thread that syncs config sources that work needs to be done
@@ -36,7 +52,7 @@ func (cc *Controller) pokeConfigSourceWorker() {
 }
 
 // syncConfigSource checks if work needs to be done to use a new configuration, and does that work if necessary
-func (cc *Controller) syncConfigSource(client clientset.Interface, nodeName string) {
+func (cc *Controller) syncConfigSource(client clientset.Interface, eventClient v1core.EventsGetter, nodeName string) {
 	select {
 	case <-cc.pendingConfigSource:
 	default:
@@ -55,20 +71,28 @@ func (cc *Controller) syncConfigSource(client clientset.Interface, nodeName stri
 
 	node, err := latestNode(cc.informer.GetStore(), nodeName)
 	if err != nil {
-		reason := "unable to read Node from internal object cache"
-		cc.configOK.SetFailedSyncCondition(reason)
-		syncerr = fmt.Errorf("%s, error: %v", reason, err)
+		cc.configOK.SetFailSyncCondition(status.FailSyncReasonInformer)
+		syncerr = fmt.Errorf("%s, error: %v", status.FailSyncReasonInformer, err)
 		return
 	}
 
 	// check the Node and download any new config
-	if updated, reason, err := cc.doSyncConfigSource(client, node.Spec.ConfigSource); err != nil {
-		cc.configOK.SetFailedSyncCondition(reason)
+	if updated, cur, reason, err := cc.doSyncConfigSource(client, node.Spec.ConfigSource); err != nil {
+		cc.configOK.SetFailSyncCondition(reason)
 		syncerr = fmt.Errorf("%s, error: %v", reason, err)
 		return
 	} else if updated {
-		// TODO(mtaufen): Consider adding a "currently restarting" node condition for this case
-		utillog.Infof("config updated, Kubelet will restart to begin using new config")
+		path := LocalConfigMessage
+		if cur != nil {
+			path = cur.APIPath()
+		}
+		// we directly log and send the event, instead of using the event recorder,
+		// because the event recorder won't flush its queue before we exit (we'd lose the event)
+		event := eventf(nodeName, apiv1.EventTypeNormal, KubeletConfigChangedEventReason, EventMessageFmt, path)
+		glog.V(3).Infof("Event(%#v): type: '%v' reason: '%v' %v", event.InvolvedObject, event.Type, event.Reason, event.Message)
+		if _, err := eventClient.Events(apiv1.NamespaceDefault).Create(event); err != nil {
+			utillog.Errorf("failed to send event, error: %v", err)
+		}
 		os.Exit(0)
 	}
 
@@ -76,36 +100,36 @@ func (cc *Controller) syncConfigSource(client clientset.Interface, nodeName stri
 	// - there is no need to restart to update the current config
 	// - there was no error trying to sync configuration
 	// - if, previously, there was an error trying to sync configuration, we need to clear that error from the condition
-	cc.configOK.ClearFailedSyncCondition()
+	cc.configOK.ClearFailSyncCondition()
 }
 
 // doSyncConfigSource checkpoints and sets the store's current config to the new config or resets config,
 // depending on the `source`, and returns whether the current config in the checkpoint store was updated as a result
-func (cc *Controller) doSyncConfigSource(client clientset.Interface, source *apiv1.NodeConfigSource) (bool, string, error) {
+func (cc *Controller) doSyncConfigSource(client clientset.Interface, source *apiv1.NodeConfigSource) (bool, checkpoint.RemoteConfigSource, string, error) {
 	if source == nil {
 		utillog.Infof("Node.Spec.ConfigSource is empty, will reset current and last-known-good to defaults")
 		updated, reason, err := cc.resetConfig()
 		if err != nil {
-			return false, reason, err
+			return false, nil, reason, err
 		}
-		return updated, "", nil
+		return updated, nil, "", nil
 	}
 
 	// if the NodeConfigSource is non-nil, download the config
 	utillog.Infof("Node.Spec.ConfigSource is non-empty, will checkpoint source and update config if necessary")
 	remote, reason, err := checkpoint.NewRemoteConfigSource(source)
 	if err != nil {
-		return false, reason, err
+		return false, nil, reason, err
 	}
 	reason, err = cc.checkpointConfigSource(client, remote)
 	if err != nil {
-		return false, reason, err
+		return false, nil, reason, err
 	}
 	updated, reason, err := cc.setCurrentConfig(remote)
 	if err != nil {
-		return false, reason, err
+		return false, nil, reason, err
 	}
-	return updated, "", nil
+	return updated, remote, "", nil
 }
 
 // checkpointConfigSource downloads and checkpoints the object referred to by `source` if the checkpoint does not already exist,
@@ -115,7 +139,7 @@ func (cc *Controller) checkpointConfigSource(client clientset.Interface, source 
 
 	// if the checkpoint already exists, skip downloading
 	if ok, err := cc.checkpointStore.Exists(uid); err != nil {
-		reason := fmt.Sprintf("unable to determine whether object with UID %q was already checkpointed", uid)
+		reason := fmt.Sprintf(status.FailSyncReasonCheckpointExistenceFmt, source.APIPath(), uid)
 		return reason, fmt.Errorf("%s, error: %v", reason, err)
 	} else if ok {
 		utillog.Infof("checkpoint already exists for object with UID %q, skipping download", uid)
@@ -131,7 +155,7 @@ func (cc *Controller) checkpointConfigSource(client clientset.Interface, source 
 	// save
 	err = cc.checkpointStore.Save(checkpoint)
 	if err != nil {
-		reason := fmt.Sprintf("failed to save checkpoint for object with UID %q", checkpoint.UID())
+		reason := fmt.Sprintf(status.FailSyncReasonSaveCheckpointFmt, source.APIPath(), checkpoint.UID())
 		return reason, fmt.Errorf("%s, error: %v", reason, err)
 	}
 
@@ -143,11 +167,10 @@ func (cc *Controller) checkpointConfigSource(client clientset.Interface, source 
 func (cc *Controller) setCurrentConfig(source checkpoint.RemoteConfigSource) (bool, string, error) {
 	updated, err := cc.checkpointStore.SetCurrentUpdated(source)
 	if err != nil {
-		str := "default"
-		if source != nil {
-			str = fmt.Sprintf("object with UID %q", source.UID())
+		if source == nil {
+			return false, status.FailSyncReasonSetCurrentLocal, err
 		}
-		return false, fmt.Sprintf("failed to set current checkpoint to %s", str), err
+		return false, fmt.Sprintf(status.FailSyncReasonSetCurrentUIDFmt, source.APIPath(), source.UID()), err
 	}
 	return updated, "", nil
 }
@@ -157,7 +180,7 @@ func (cc *Controller) setCurrentConfig(source checkpoint.RemoteConfigSource) (bo
 func (cc *Controller) resetConfig() (bool, string, error) {
 	updated, err := cc.checkpointStore.Reset()
 	if err != nil {
-		return false, "failed to reset to using local (default or init) config", err
+		return false, status.FailSyncReasonReset, err
 	}
 	return updated, "", nil
 }
@@ -181,4 +204,44 @@ func latestNode(store cache.Store, nodeName string) (*apiv1.Node, error) {
 		return nil, err
 	}
 	return node, nil
+}
+
+// eventf constructs and returns an event containing a formatted message
+// similar to k8s.io/client-go/tools/record/event.go
+func eventf(nodeName, eventType, reason, messageFmt string, args ...interface{}) *apiv1.Event {
+	return makeEvent(nodeName, eventType, reason, fmt.Sprintf(messageFmt, args...))
+}
+
+// makeEvent constructs an event
+// similar to makeEvent in k8s.io/client-go/tools/record/event.go
+func makeEvent(nodeName, eventtype, reason, message string) *apiv1.Event {
+	const componentKubelet = "kubelet"
+	// NOTE(mtaufen): This is consistent with pkg/kubelet/kubelet.go. Even though setting the node
+	// name as the UID looks strange, it appears to be conventional for events sent by the Kubelet.
+	ref := apiv1.ObjectReference{
+		Kind:      "Node",
+		Name:      nodeName,
+		UID:       types.UID(nodeName),
+		Namespace: "",
+	}
+
+	t := metav1.Time{Time: time.Now()}
+	namespace := ref.Namespace
+	if namespace == "" {
+		namespace = metav1.NamespaceDefault
+	}
+	return &apiv1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%v.%x", ref.Name, t.UnixNano()),
+			Namespace: namespace,
+		},
+		InvolvedObject: ref,
+		Reason:         reason,
+		Message:        message,
+		FirstTimestamp: t,
+		LastTimestamp:  t,
+		Count:          1,
+		Type:           eventtype,
+		Source:         apiv1.EventSource{Component: componentKubelet, Host: string(nodeName)},
+	}
 }

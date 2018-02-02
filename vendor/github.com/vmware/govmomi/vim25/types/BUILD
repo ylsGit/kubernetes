@@ -8,10 +8,10 @@ go_library(
         "fault.go",
         "helpers.go",
         "if.go",
-        "internal.go",
         "registry.go",
         "types.go",
     ],
+    importpath = "github.com/vmware/govmomi/vim25/types",
     visibility = ["//visibility:public"],
 )
 

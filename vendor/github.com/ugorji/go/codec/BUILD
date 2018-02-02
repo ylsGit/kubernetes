@@ -28,6 +28,7 @@ go_library(
         "simple.go",
         "time.go",
     ],
+    importpath = "github.com/ugorji/go/codec",
     visibility = ["//visibility:public"],
 )
 
@@ -40,10 +41,7 @@ filegroup(
 
 filegroup(
     name = "all-srcs",
-    srcs = [
-        ":package-srcs",
-        "//vendor/github.com/ugorji/go/codec/codecgen:all-srcs",
-    ],
+    srcs = [":package-srcs"],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],
 )

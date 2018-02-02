@@ -29,7 +29,7 @@ import (
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	kubetypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/kubernetes/pkg/credentialprovider"
 	apitest "k8s.io/kubernetes/pkg/kubelet/apis/cri/testing"
@@ -70,6 +70,7 @@ type sandboxTemplate struct {
 type containerTemplate struct {
 	pod            *v1.Pod
 	container      *v1.Container
+	containerType  kubecontainer.ContainerType
 	sandboxAttempt uint32
 	attempt        int
 	createdAt      int64
@@ -142,7 +143,7 @@ func makeFakeContainer(t *testing.T, m *kubeGenericRuntimeManager, template cont
 	sandboxConfig, err := m.generatePodSandboxConfig(template.pod, template.sandboxAttempt)
 	assert.NoError(t, err, "generatePodSandboxConfig for container template %+v", template)
 
-	containerConfig, err := m.generateContainerConfig(template.container, template.pod, template.attempt, "", template.container.Image)
+	containerConfig, err := m.generateContainerConfig(template.container, template.pod, template.attempt, "", template.container.Image, template.containerType)
 	assert.NoError(t, err, "generateContainerConfig for container template %+v", template)
 
 	podSandboxID := apitest.BuildSandboxName(sandboxConfig.Metadata)
@@ -216,21 +217,12 @@ func verifyPods(a, b []*kubecontainer.Pod) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-func verifyFakeContainerList(fakeRuntime *apitest.FakeRuntimeService, expected []string) ([]string, bool) {
-	actual := []string{}
+func verifyFakeContainerList(fakeRuntime *apitest.FakeRuntimeService, expected sets.String) (sets.String, bool) {
+	actual := sets.NewString()
 	for _, c := range fakeRuntime.Containers {
-		actual = append(actual, c.Id)
+		actual.Insert(c.Id)
 	}
-	sort.Sort(sort.StringSlice(actual))
-	sort.Sort(sort.StringSlice(expected))
-
-	return actual, reflect.DeepEqual(expected, actual)
-}
-
-type containerRecord struct {
-	container *v1.Container
-	attempt   uint32
-	state     runtimeapi.ContainerState
+	return actual, actual.Equal(expected)
 }
 
 // Only extract the fields of interests.
@@ -381,7 +373,7 @@ func TestGetPods(t *testing.T) {
 
 	expected := []*kubecontainer.Pod{
 		{
-			ID:         kubetypes.UID("12345678"),
+			ID:         types.UID("12345678"),
 			Name:       "foo",
 			Namespace:  "new",
 			Containers: []*kubecontainer.Container{containers[0], containers[1]},
@@ -618,9 +610,9 @@ func TestPruneInitContainers(t *testing.T) {
 	assert.NoError(t, err)
 
 	m.pruneInitContainersBeforeStart(pod, podStatus)
-	expectedContainers := []string{fakes[0].Id, fakes[2].Id}
+	expectedContainers := sets.NewString(fakes[0].Id, fakes[2].Id)
 	if actual, ok := verifyFakeContainerList(fakeRuntime, expectedContainers); !ok {
-		t.Errorf("expected %q, got %q", expectedContainers, actual)
+		t.Errorf("expected %v, got %v", expectedContainers, actual)
 	}
 }
 
@@ -752,6 +744,7 @@ func makeBasePodAndStatus() (*v1.Pod, *kubecontainer.PodStatus) {
 				Id:       "sandboxID",
 				State:    runtimeapi.PodSandboxState_SANDBOX_READY,
 				Metadata: &runtimeapi.PodSandboxMetadata{Name: pod.Name, Namespace: pod.Namespace, Uid: "sandboxuid", Attempt: uint32(0)},
+				Network:  &runtimeapi.PodSandboxNetworkStatus{Ip: "10.0.0.1"},
 			},
 		},
 		ContainerStatuses: []*kubecontainer.ContainerStatus{
@@ -885,7 +878,19 @@ func TestComputePodActions(t *testing.T) {
 				ContainersToKill:  getKillMap(basePod, baseStatus, []int{}),
 			},
 		},
-
+		"Kill pod and recreate all containers if the PodSandbox does not have an IP": {
+			mutateStatusFn: func(status *kubecontainer.PodStatus) {
+				status.SandboxStatuses[0].Network.Ip = ""
+			},
+			actions: podActions{
+				KillPod:           true,
+				CreateSandbox:     true,
+				SandboxID:         baseStatus.SandboxStatuses[0].Id,
+				Attempt:           uint32(1),
+				ContainersToStart: []int{0, 1, 2},
+				ContainersToKill:  getKillMap(basePod, baseStatus, []int{}),
+			},
+		},
 		"Kill and recreate the container if the container's spec changed": {
 			mutatePodFn: func(pod *v1.Pod) {
 				pod.Spec.RestartPolicy = v1.RestartPolicyAlways

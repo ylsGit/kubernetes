@@ -64,7 +64,8 @@ func NewCmdScale(f cmdutil.Factory, out io.Writer) *cobra.Command {
 	argAliases := kubectl.ResourceAliases(validArgs)
 
 	cmd := &cobra.Command{
-		Use:     "scale [--resource-version=version] [--current-replicas=count] --replicas=COUNT (-f FILENAME | TYPE NAME)",
+		Use: "scale [--resource-version=version] [--current-replicas=count] --replicas=COUNT (-f FILENAME | TYPE NAME)",
+		DisableFlagsInUseLine: true,
 		Short:   i18n.T("Set a new size for a Deployment, ReplicaSet, Replication Controller, or Job"),
 		Long:    scaleLong,
 		Example: scaleExample,
@@ -77,6 +78,8 @@ func NewCmdScale(f cmdutil.Factory, out io.Writer) *cobra.Command {
 		ValidArgs:  validArgs,
 		ArgAliases: argAliases,
 	}
+	cmd.Flags().StringP("selector", "l", "", "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
+	cmd.Flags().Bool("all", false, "Select all resources in the namespace of the specified resource types")
 	cmd.Flags().String("resource-version", "", i18n.T("Precondition for resource version. Requires that the current resource version match this value in order to scale."))
 	cmd.Flags().Int("current-replicas", -1, "Precondition for current size. Requires that the current size of the resource match this value in order to scale.")
 	cmd.Flags().Int("replicas", -1, "The new desired number of replicas. Required.")
@@ -98,13 +101,18 @@ func RunScale(f cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []strin
 		return err
 	}
 
+	selector := cmdutil.GetFlagString(cmd, "selector")
+	all := cmdutil.GetFlagBool(cmd, "all")
+
 	mapper, _ := f.Object()
-	r := f.NewBuilder(true).
+	r := f.NewBuilder().
+		Internal().
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, options).
-		ResourceTypeOrNameArgs(false, args...).
+		ResourceTypeOrNameArgs(all, args...).
 		Flatten().
+		LabelSelectorParam(selector).
 		Do()
 	err = r.Err()
 	if resource.IsUsageError(err) {
@@ -173,7 +181,7 @@ func RunScale(f cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []strin
 			}
 		}
 		counter++
-		cmdutil.PrintSuccess(mapper, shortOutput, out, info.Mapping.Resource, info.Name, false, "scaled")
+		f.PrintSuccess(mapper, shortOutput, out, info.Mapping.Resource, info.Name, false, "scaled")
 		return nil
 	})
 	if err != nil {

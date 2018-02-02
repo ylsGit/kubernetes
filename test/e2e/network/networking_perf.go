@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 	"k8s.io/api/core/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
 const (
@@ -35,9 +36,8 @@ const (
 	smallClusterTimeout = 200 * time.Second
 )
 
-// Declared as Flakey since it has not been proven to run in parallel on small nodes or slow networks in CI
-// TODO jayunit100 : Retag this test according to semantics from #22401
-var _ = SIGDescribe("Networking IPerf [Experimental] [Slow] [Feature:Networking-Performance]", func() {
+// networkingIPerf test runs iperf on a container in either IPv4 or IPv6 mode.
+func networkingIPerfTest(isIPv6 bool) {
 
 	f := framework.NewDefaultFramework("network-perf")
 
@@ -47,6 +47,11 @@ var _ = SIGDescribe("Networking IPerf [Experimental] [Slow] [Feature:Networking-
 	numClient := 1
 	numServer := 1
 	maxBandwidthBits := gceBandwidthBitsEstimate
+
+	familyStr := ""
+	if isIPv6 {
+		familyStr = "-V "
+	}
 
 	It(fmt.Sprintf("should transfer ~ 1GB onto the service endpoint %v servers (maximum of %v clients)", numServer, numClient), func() {
 		nodes := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
@@ -63,11 +68,11 @@ var _ = SIGDescribe("Networking IPerf [Experimental] [Slow] [Feature:Networking-
 				return v1.PodSpec{
 					Containers: []v1.Container{{
 						Name:  "iperf-server",
-						Image: "gcr.io/google_containers/iperf:e2e",
+						Image: imageutils.GetE2EImage(imageutils.Iperf),
 						Args: []string{
 							"/bin/sh",
 							"-c",
-							"/usr/local/bin/iperf -s -p 8001 ",
+							"/usr/local/bin/iperf " + familyStr + "-s -p 8001 ",
 						},
 						Ports: []v1.ContainerPort{{ContainerPort: 8001}},
 					}},
@@ -91,11 +96,11 @@ var _ = SIGDescribe("Networking IPerf [Experimental] [Slow] [Feature:Networking-
 					Containers: []v1.Container{
 						{
 							Name:  "iperf-client",
-							Image: "gcr.io/google_containers/iperf:e2e",
+							Image: imageutils.GetE2EImage(imageutils.Iperf),
 							Args: []string{
 								"/bin/sh",
 								"-c",
-								"/usr/local/bin/iperf -c service-for-" + appName + " -p 8002 --reportstyle C && sleep 5",
+								"/usr/local/bin/iperf " + familyStr + "-c service-for-" + appName + " -p 8002 --reportstyle C && sleep 5",
 							},
 						},
 					},
@@ -152,4 +157,16 @@ var _ = SIGDescribe("Networking IPerf [Experimental] [Slow] [Feature:Networking-
 			framework.Logf("%v had bandwidth %v.  Ratio to expected (%v) was %f", ipClient, bandwidth, expectedBandwidth, float64(bandwidth)/float64(expectedBandwidth))
 		}
 	})
+}
+
+// Declared as Flakey since it has not been proven to run in parallel on small nodes or slow networks in CI
+// TODO jayunit100 : Retag this test according to semantics from #22401
+var _ = SIGDescribe("Networking IPerf IPv4 [Experimental] [Feature:Networking-IPv4] [Slow] [Feature:Networking-Performance]", func() {
+	networkingIPerfTest(false)
+})
+
+// Declared as Flakey since it has not been proven to run in parallel on small nodes or slow networks in CI
+// TODO jayunit100 : Retag this test according to semantics from #22401
+var _ = SIGDescribe("Networking IPerf IPv6 [Experimental] [Feature:Networking-IPv6] [Slow] [Feature:Networking-Performance]", func() {
+	networkingIPerfTest(true)
 })

@@ -18,7 +18,7 @@ package batch
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
 )
 
 // +genclient
@@ -108,6 +108,16 @@ type JobSpec struct {
 	// before the system tries to terminate it; value must be positive integer
 	// +optional
 	ActiveDeadlineSeconds *int64
+
+	// Optional number of retries before marking this job failed.
+	// Defaults to 6
+	// +optional
+	BackoffLimit *int32
+
+	// TODO enabled it when https://github.com/kubernetes/kubernetes/issues/28486 has been fixed
+	// Optional number of failed pods to retain.
+	// +optional
+	// FailedPodsLimit *int32
 
 	// A label query over pods that should match the pod count.
 	// Normally, the system sets this field for you.
@@ -240,7 +250,10 @@ type CronJobSpec struct {
 	StartingDeadlineSeconds *int64
 
 	// Specifies how to treat concurrent executions of a Job.
-	// Defaults to Allow.
+	// Valid values are:
+	// - "Allow" (default): allows CronJobs to run concurrently;
+	// - "Forbid": forbids concurrent runs, skipping next run if previous run hasn't finished yet;
+	// - "Replace": cancels currently running job and replaces it with a new one
 	// +optional
 	ConcurrencyPolicy ConcurrencyPolicy
 

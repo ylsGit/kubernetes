@@ -43,7 +43,6 @@ var _ = instrumentation.SIGDescribe("Cluster level logging implemented by Stackd
 	})
 
 	ginkgo.It("should ingest logs", func() {
-
 		withLogProviderForScope(f, podsScope, func(p *sdLogProvider) {
 			ginkgo.By("Checking ingesting text logs", func() {
 				pod, err := utils.StartAndReturnSelf(utils.NewRepeatingLoggingPod("synthlogger-1", "hey"), f)
@@ -107,6 +106,35 @@ var _ = instrumentation.SIGDescribe("Cluster level logging implemented by Stackd
 				err = utils.WaitForLogs(c, ingestionInterval, ingestionTimeout)
 				framework.ExpectNoError(err)
 			})
+
+			ginkgo.By("Checking that too long lines are trimmed", func() {
+				maxLength := 100 * 1024
+				cmd := []string{
+					"/bin/sh",
+					"-c",
+					fmt.Sprintf("while :; do printf '%%*s' %d | tr ' ' 'A'; echo; sleep 60; done", maxLength+1),
+				}
+
+				pod, err := utils.StartAndReturnSelf(utils.NewExecLoggingPod("synthlogger-4", cmd), f)
+				framework.ExpectNoError(err, "Failed to start a pod")
+
+				ginkgo.By("Waiting for logs to ingest")
+				c := utils.NewLogChecker(p, func(_ string, logEntries []utils.LogEntry) (bool, error) {
+					if len(logEntries) == 0 {
+						return false, nil
+					}
+					log := logEntries[0]
+					if log.JSONPayload != nil {
+						return false, fmt.Errorf("got json log entry %v, wanted plain text", log.JSONPayload)
+					}
+					if len(log.TextPayload) > maxLength {
+						return false, fmt.Errorf("got too long entry of length %d", len(log.TextPayload))
+					}
+					return true, nil
+				}, utils.JustTimeout, pod.Name())
+				err = utils.WaitForLogs(c, ingestionInterval, ingestionTimeout)
+				framework.ExpectNoError(err)
+			})
 		})
 	})
 
@@ -140,7 +168,7 @@ var _ = instrumentation.SIGDescribe("Cluster level logging implemented by Stackd
 		})
 	})
 
-	ginkgo.It("should ingest system logs from all nodes", func() {
+	ginkgo.It("should ingest system logs from all nodes [Feature:StackdriverLogging]", func() {
 		withLogProviderForScope(f, systemScope, func(p *sdLogProvider) {
 			ginkgo.By("Waiting for some kubelet logs to be ingested from each node", func() {
 				nodeIds := utils.GetNodeIds(f.ClientSet)

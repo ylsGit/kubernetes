@@ -23,10 +23,13 @@ import (
 
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	utiltesting "k8s.io/client-go/util/testing"
 	// util.go uses api.Codecs.LegacyCodec so import this package to do some
 	// resource initialization.
-	_ "k8s.io/kubernetes/pkg/api/install"
-	"k8s.io/kubernetes/pkg/api/v1/helper"
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
+	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/util/mount"
 )
 
 var nodeLabels map[string]string = map[string]string{
@@ -226,6 +229,78 @@ spec:
 			if pod == nil {
 				t.Errorf("test %q expected pod, got nil", test.name)
 			}
+		}
+	}
+}
+func TestZonesToSet(t *testing.T) {
+	functionUnderTest := "ZonesToSet"
+	// First part: want an error
+	sliceOfZones := []string{"", ",", "us-east-1a, , us-east-1d", ", us-west-1b", "us-west-2b,"}
+	for _, zones := range sliceOfZones {
+		if got, err := ZonesToSet(zones); err == nil {
+			t.Errorf("%v(%v) returned (%v), want (%v)", functionUnderTest, zones, got, "an error")
+		}
+	}
+
+	// Second part: want no error
+	tests := []struct {
+		zones string
+		want  sets.String
+	}{
+		{
+			zones: "us-east-1a",
+			want:  sets.String{"us-east-1a": sets.Empty{}},
+		},
+		{
+			zones: "us-east-1a, us-west-2a",
+			want: sets.String{
+				"us-east-1a": sets.Empty{},
+				"us-west-2a": sets.Empty{},
+			},
+		},
+	}
+	for _, tt := range tests {
+		if got, err := ZonesToSet(tt.zones); err != nil || !got.Equal(tt.want) {
+			t.Errorf("%v(%v) returned (%v), want (%v)", functionUnderTest, tt.zones, got, tt.want)
+		}
+	}
+}
+
+func TestDoUnmountMountPoint(t *testing.T) {
+
+	tmpDir1, err1 := utiltesting.MkTmpdir("umount_test1")
+	if err1 != nil {
+		t.Fatalf("error creating temp dir: %v", err1)
+	}
+	defer os.RemoveAll(tmpDir1)
+
+	tmpDir2, err2 := utiltesting.MkTmpdir("umount_test2")
+	if err2 != nil {
+		t.Fatalf("error creating temp dir: %v", err2)
+	}
+	defer os.RemoveAll(tmpDir2)
+
+	// Second part: want no error
+	tests := []struct {
+		mountPath    string
+		corruptedMnt bool
+	}{
+		{
+			mountPath:    tmpDir1,
+			corruptedMnt: true,
+		},
+		{
+			mountPath:    tmpDir2,
+			corruptedMnt: false,
+		},
+	}
+
+	fake := &mount.FakeMounter{}
+
+	for _, tt := range tests {
+		err := doUnmountMountPoint(tt.mountPath, fake, false, tt.corruptedMnt)
+		if err != nil {
+			t.Errorf("err Expected nil, but got: %v", err)
 		}
 	}
 }

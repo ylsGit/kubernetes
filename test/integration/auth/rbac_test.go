@@ -36,10 +36,12 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/registry/generic"
+	externalclientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/api/testapi"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	rbacapi "k8s.io/kubernetes/pkg/apis/rbac"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/master"
@@ -64,10 +66,10 @@ func clientForToken(user string) *http.Client {
 	}
 }
 
-func clientsetForToken(user string, config *restclient.Config) clientset.Interface {
+func clientsetForToken(user string, config *restclient.Config) (clientset.Interface, externalclientset.Interface) {
 	configCopy := *config
 	configCopy.BearerToken = user
-	return clientset.NewForConfigOrDie(&configCopy)
+	return clientset.NewForConfigOrDie(&configCopy), externalclientset.NewForConfigOrDie(&configCopy)
 }
 
 type testRESTOptionsGetter struct {
@@ -75,7 +77,7 @@ type testRESTOptionsGetter struct {
 }
 
 func (getter *testRESTOptionsGetter) GetRESTOptions(resource schema.GroupResource) (generic.RESTOptions, error) {
-	storageConfig, err := getter.config.StorageFactory.NewConfig(resource)
+	storageConfig, err := getter.config.ExtraConfig.StorageFactory.NewConfig(resource)
 	if err != nil {
 		return generic.RESTOptions{}, fmt.Errorf("failed to get storage: %v", err)
 	}
@@ -427,10 +429,11 @@ func TestRBAC(t *testing.T) {
 		_, s, closeFn := framework.RunAMaster(masterConfig)
 		defer closeFn()
 
-		clientConfig := &restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{NegotiatedSerializer: api.Codecs}}
+		clientConfig := &restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{NegotiatedSerializer: legacyscheme.Codecs}}
 
 		// Bootstrap the API Server with the test case's initial roles.
-		if err := tc.bootstrapRoles.bootstrap(clientsetForToken(superUser, clientConfig)); err != nil {
+		superuserClient, _ := clientsetForToken(superUser, clientConfig)
+		if err := tc.bootstrapRoles.bootstrap(superuserClient); err != nil {
 			t.Errorf("case %d: failed to apply initial roles: %v", i, err)
 			continue
 		}
@@ -553,9 +556,9 @@ func TestBootstrapping(t *testing.T) {
 
 	t.Errorf("missing cluster-admin: %v", clusterRoles)
 
-	healthBytes, err := clientset.Discovery().RESTClient().Get().AbsPath("/healthz/poststarthooks/rbac/bootstrap-roles").DoRaw()
+	healthBytes, err := clientset.Discovery().RESTClient().Get().AbsPath("/healthz/poststarthook/rbac/bootstrap-roles").DoRaw()
 	if err != nil {
 		t.Error(err)
 	}
-	t.Errorf("expected %v, got %v", "asdf", string(healthBytes))
+	t.Errorf("error bootstrapping roles: %s", string(healthBytes))
 }

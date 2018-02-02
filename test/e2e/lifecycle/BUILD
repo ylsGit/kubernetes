@@ -16,8 +16,9 @@ go_library(
         "resize_nodes.go",
         "restart.go",
     ],
+    importpath = "k8s.io/kubernetes/test/e2e/lifecycle",
     deps = [
-        "//pkg/api:go_default_library",
+        "//pkg/apis/core:go_default_library",
         "//pkg/kubelet/pod:go_default_library",
         "//pkg/util/version:go_default_library",
         "//test/e2e/chaosmonkey:go_default_library",
@@ -28,6 +29,7 @@ go_library(
         "//test/e2e/upgrades/apps:go_default_library",
         "//test/e2e/upgrades/storage:go_default_library",
         "//test/utils:go_default_library",
+        "//test/utils/image:go_default_library",
         "//test/utils/junit:go_default_library",
         "//vendor/github.com/onsi/ginkgo:go_default_library",
         "//vendor/github.com/onsi/gomega:go_default_library",

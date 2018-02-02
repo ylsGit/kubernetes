@@ -43,13 +43,20 @@ func TestValidatePolicy(t *testing.T) {
 				"/metrics",
 				"*",
 			},
+		}, { // Omit RequestReceived stage
+			Level: audit.LevelMetadata,
+			OmitStages: []audit.Stage{
+				audit.Stage("RequestReceived"),
+			},
 		},
 	}
 	successCases := []audit.Policy{}
 	for _, rule := range validRules {
 		successCases = append(successCases, audit.Policy{Rules: []audit.PolicyRule{rule}})
 	}
-	successCases = append(successCases, audit.Policy{})                  // Empty policy is valid.
+	successCases = append(successCases, audit.Policy{})                         // Empty policy is valid.
+	successCases = append(successCases, audit.Policy{OmitStages: []audit.Stage{ // Policy with omitStages
+		audit.Stage("RequestReceived")}})
 	successCases = append(successCases, audit.Policy{Rules: validRules}) // Multiple rules.
 
 	for i, policy := range successCases {
@@ -102,12 +109,38 @@ func TestValidatePolicy(t *testing.T) {
 				"/metrics",
 			},
 		},
+		{ // ResourceNames without Resources
+			Level:      audit.LevelMetadata,
+			Verbs:      []string{"get"},
+			Resources:  []audit.GroupResources{{ResourceNames: []string{"leader"}}},
+			Namespaces: []string{"kube-system"},
+		},
+		{ // invalid omitStages in rule
+			Level: audit.LevelMetadata,
+			OmitStages: []audit.Stage{
+				audit.Stage("foo"),
+			},
+		},
 	}
 	errorCases := []audit.Policy{}
 	for _, rule := range invalidRules {
 		errorCases = append(errorCases, audit.Policy{Rules: []audit.PolicyRule{rule}})
 	}
-	errorCases = append(errorCases, audit.Policy{Rules: append(validRules, audit.PolicyRule{})}) // Multiple rules.
+
+	// Multiple rules.
+	errorCases = append(errorCases, audit.Policy{Rules: append(validRules, audit.PolicyRule{})})
+
+	// invalid omitStages in policy
+	policy := audit.Policy{OmitStages: []audit.Stage{
+		audit.Stage("foo"),
+	},
+		Rules: []audit.PolicyRule{
+			{
+				Level: audit.LevelMetadata,
+			},
+		},
+	}
+	errorCases = append(errorCases, policy)
 
 	for i, policy := range errorCases {
 		if errs := ValidatePolicy(&policy); len(errs) == 0 {

@@ -2,14 +2,8 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "go_default_library",
-    srcs = ["grpclb.pb.go"],
-    visibility = ["//visibility:public"],
-    deps = ["//vendor/github.com/golang/protobuf/proto:go_default_library"],
-)
-
-filegroup(
-    name = "go_default_library_protos",
-    srcs = ["grpclb.proto"],
+    srcs = ["doc.go"],
+    importpath = "google.golang.org/grpc/grpclb/grpc_lb_v1",
     visibility = ["//visibility:public"],
 )
 
@@ -22,7 +16,10 @@ filegroup(
 
 filegroup(
     name = "all-srcs",
-    srcs = [":package-srcs"],
+    srcs = [
+        ":package-srcs",
+        "//vendor/google.golang.org/grpc/grpclb/grpc_lb_v1/messages:all-srcs",
+    ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],
 )

@@ -23,29 +23,31 @@ import (
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/registry/cachesize"
+	"k8s.io/kubernetes/pkg/printers"
+	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
+	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 	"k8s.io/kubernetes/pkg/registry/extensions/daemonset"
 )
 
 // rest implements a RESTStorage for DaemonSets
 type REST struct {
 	*genericregistry.Store
+	categories []string
 }
 
 // NewREST returns a RESTStorage object that will work against DaemonSets.
 func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, *StatusREST) {
 	store := &genericregistry.Store{
-		Copier:                   api.Scheme,
 		NewFunc:                  func() runtime.Object { return &extensions.DaemonSet{} },
 		NewListFunc:              func() runtime.Object { return &extensions.DaemonSetList{} },
 		DefaultQualifiedResource: extensions.Resource("daemonsets"),
-		WatchCacheSize:           cachesize.GetWatchCacheSizeByResource("daemonsets"),
 
 		CreateStrategy: daemonset.Strategy,
 		UpdateStrategy: daemonset.Strategy,
 		DeleteStrategy: daemonset.Strategy,
+
+		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
 	}
 	options := &generic.StoreOptions{RESTOptions: optsGetter}
 	if err := store.CompleteWithOptions(options); err != nil {
@@ -55,7 +57,7 @@ func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, *StatusREST) {
 	statusStore := *store
 	statusStore.UpdateStrategy = daemonset.StatusStrategy
 
-	return &REST{store}, &StatusREST{store: &statusStore}
+	return &REST{store, []string{"all"}}, &StatusREST{store: &statusStore}
 }
 
 // Implement ShortNamesProvider
@@ -70,7 +72,12 @@ var _ rest.CategoriesProvider = &REST{}
 
 // Categories implements the CategoriesProvider interface. Returns a list of categories a resource is part of.
 func (r *REST) Categories() []string {
-	return []string{"all"}
+	return r.categories
+}
+
+func (r *REST) WithCategories(categories []string) *REST {
+	r.categories = categories
+	return r
 }
 
 // StatusREST implements the REST endpoint for changing the status of a daemonset
@@ -88,6 +95,6 @@ func (r *StatusREST) Get(ctx genericapirequest.Context, name string, options *me
 }
 
 // Update alters the status subset of an object.
-func (r *StatusREST) Update(ctx genericapirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
-	return r.store.Update(ctx, name, objInfo)
+func (r *StatusREST) Update(ctx genericapirequest.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
+	return r.store.Update(ctx, name, objInfo, createValidation, updateValidation)
 }

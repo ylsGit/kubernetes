@@ -22,13 +22,13 @@ import (
 
 	"github.com/golang/glog"
 
-	autoscaling "k8s.io/api/autoscaling/v2alpha1"
+	autoscaling "k8s.io/api/autoscaling/v2beta1"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	customapi "k8s.io/metrics/pkg/apis/custom_metrics/v1alpha1"
-	resourceclient "k8s.io/metrics/pkg/client/clientset_generated/clientset/typed/metrics/v1alpha1"
+	customapi "k8s.io/metrics/pkg/apis/custom_metrics/v1beta1"
+	resourceclient "k8s.io/metrics/pkg/client/clientset_generated/clientset/typed/metrics/v1beta1"
 	customclient "k8s.io/metrics/pkg/client/custom_metrics"
 )
 
@@ -58,11 +58,11 @@ type resourceMetricsClient struct {
 func (c *resourceMetricsClient) GetResourceMetric(resource v1.ResourceName, namespace string, selector labels.Selector) (PodMetricsInfo, time.Time, error) {
 	metrics, err := c.client.PodMetricses(namespace).List(metav1.ListOptions{LabelSelector: selector.String()})
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("unable to fetch metrics from API: %v", err)
+		return nil, time.Time{}, fmt.Errorf("unable to fetch metrics from resource metrics API: %v", err)
 	}
 
 	if len(metrics.Items) == 0 {
-		return nil, time.Time{}, fmt.Errorf("no metrics returned from heapster")
+		return nil, time.Time{}, fmt.Errorf("no metrics returned from resource metrics API")
 	}
 
 	res := make(PodMetricsInfo, len(metrics.Items))
@@ -101,7 +101,7 @@ type customMetricsClient struct {
 func (c *customMetricsClient) GetRawMetric(metricName string, namespace string, selector labels.Selector) (PodMetricsInfo, time.Time, error) {
 	metrics, err := c.client.NamespacedMetrics(namespace).GetForObjects(schema.GroupKind{Kind: "Pod"}, selector, metricName)
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("unable to fetch metrics from API: %v", err)
+		return nil, time.Time{}, fmt.Errorf("unable to fetch metrics from custom metrics API: %v", err)
 	}
 
 	if len(metrics.Items) == 0 {
@@ -134,7 +134,7 @@ func (c *customMetricsClient) GetObjectMetric(metricName string, namespace strin
 	}
 
 	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("unable to fetch metrics from API: %v", err)
+		return 0, time.Time{}, fmt.Errorf("unable to fetch metrics from custom metrics API: %v", err)
 	}
 
 	return metricValue.Value.MilliValue(), metricValue.Timestamp.Time, nil

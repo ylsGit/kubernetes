@@ -28,8 +28,8 @@ import (
 
 // interface exposed by the cloud provider implementing Disk functionlity
 type DiskController interface {
-	CreateBlobDisk(dataDiskName string, storageAccountType storage.SkuName, sizeGB int, forceStandAlone bool) (string, error)
-	DeleteBlobDisk(diskUri string, wasForced bool) error
+	CreateBlobDisk(dataDiskName string, storageAccountType storage.SkuName, sizeGB int) (string, error)
+	DeleteBlobDisk(diskUri string) error
 
 	CreateManagedDisk(diskName string, storageAccountType storage.SkuName, sizeGB int, tags map[string]string) (string, error)
 	DeleteManagedDisk(diskURI string) error
@@ -48,7 +48,7 @@ type DiskController interface {
 	GetNextDiskLun(nodeName types.NodeName) (int32, error)
 
 	// Create a VHD blob
-	CreateVolume(name, storageAccount string, storageAccountType storage.SkuName, location string, requestGB int) (string, string, int, error)
+	CreateVolume(name, storageAccount, storageAccountType, location string, requestGB int) (string, string, int, error)
 	// Delete a VHD blob
 	DeleteVolume(diskURI string) error
 }
@@ -116,7 +116,7 @@ func (plugin *azureDataDiskPlugin) GetAccessModes() []v1.PersistentVolumeAccessM
 func (plugin *azureDataDiskPlugin) NewAttacher() (volume.Attacher, error) {
 	azure, err := getCloud(plugin.host)
 	if err != nil {
-		glog.V(4).Infof("failed to get azure cloud in NewAttacher, plugin.host : %s", plugin.host.GetHostName())
+		glog.Errorf("failed to get azure cloud in NewAttacher, plugin.host : %s, err:%v", plugin.host.GetHostName(), err)
 		return nil, err
 	}
 

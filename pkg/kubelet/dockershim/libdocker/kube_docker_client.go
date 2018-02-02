@@ -31,6 +31,7 @@ import (
 
 	dockertypes "github.com/docker/docker/api/types"
 	dockercontainer "github.com/docker/docker/api/types/container"
+	dockerimagetypes "github.com/docker/docker/api/types/image"
 	dockerapi "github.com/docker/docker/client"
 	dockermessage "github.com/docker/docker/pkg/jsonmessage"
 	dockerstdcopy "github.com/docker/docker/pkg/stdcopy"
@@ -91,7 +92,7 @@ func newKubeDockerClient(dockerClient *dockerapi.Client, requestTimeout, imagePu
 		glog.Warningf("Using empty version for docker client, this may sometimes cause compatibility issue.")
 	} else {
 		// Update client version with real api version.
-		dockerClient.UpdateClientVersion(v.APIVersion)
+		dockerClient.NegotiateAPIVersionPing(dockertypes.Ping{APIVersion: v.APIVersion})
 	}
 	return k
 }
@@ -113,6 +114,21 @@ func (d *kubeDockerClient) InspectContainer(id string) (*dockertypes.ContainerJS
 	ctx, cancel := d.getTimeoutContext()
 	defer cancel()
 	containerJSON, err := d.client.ContainerInspect(ctx, id)
+	if ctxErr := contextError(ctx); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &containerJSON, nil
+}
+
+// InspectContainerWithSize is currently only used for Windows container stats
+func (d *kubeDockerClient) InspectContainerWithSize(id string) (*dockertypes.ContainerJSON, error) {
+	ctx, cancel := d.getTimeoutContext()
+	defer cancel()
+	// Inspects the container including the fields SizeRw and SizeRootFs.
+	containerJSON, _, err := d.client.ContainerInspectWithRaw(ctx, id, true)
 	if ctxErr := contextError(ctx); ctxErr != nil {
 		return nil, ctxErr
 	}
@@ -222,7 +238,7 @@ func (d *kubeDockerClient) InspectImageByRef(imageRef string) (*dockertypes.Imag
 	return resp, nil
 }
 
-func (d *kubeDockerClient) ImageHistory(id string) ([]dockertypes.ImageHistory, error) {
+func (d *kubeDockerClient) ImageHistory(id string) ([]dockerimagetypes.HistoryResponseItem, error) {
 	ctx, cancel := d.getTimeoutContext()
 	defer cancel()
 	resp, err := d.client.ImageHistory(ctx, id)
@@ -376,7 +392,7 @@ func (d *kubeDockerClient) PullImage(image string, auth dockertypes.AuthConfig, 
 	return nil
 }
 
-func (d *kubeDockerClient) RemoveImage(image string, opts dockertypes.ImageRemoveOptions) ([]dockertypes.ImageDelete, error) {
+func (d *kubeDockerClient) RemoveImage(image string, opts dockertypes.ImageRemoveOptions) ([]dockertypes.ImageDeleteResponseItem, error) {
 	ctx, cancel := d.getTimeoutContext()
 	defer cancel()
 	resp, err := d.client.ImageRemove(ctx, image, opts)
@@ -519,6 +535,27 @@ func (d *kubeDockerClient) ResizeContainerTTY(id string, height, width uint) err
 		Height: height,
 		Width:  width,
 	})
+}
+
+// GetContainerStats is currently only used for Windows container stats
+func (d *kubeDockerClient) GetContainerStats(id string) (*dockertypes.StatsJSON, error) {
+	ctx, cancel := d.getCancelableContext()
+	defer cancel()
+
+	response, err := d.client.ContainerStats(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+
+	dec := json.NewDecoder(response.Body)
+	var stats dockertypes.StatsJSON
+	err = dec.Decode(&stats)
+	if err != nil {
+		return nil, err
+	}
+
+	defer response.Body.Close()
+	return &stats, nil
 }
 
 // redirectResponseToOutputStream redirect the response stream to stdout and stderr. When tty is true, all stream will

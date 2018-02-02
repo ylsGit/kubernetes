@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/security/apparmor"
 	"k8s.io/kubernetes/pkg/security/podsecuritypolicy/seccomp"
@@ -1169,7 +1169,7 @@ func TestValidateDeployment(t *testing.T) {
 	// must have valid strategy type
 	invalidStrategyDeployment := validDeployment()
 	invalidStrategyDeployment.Spec.Strategy.Type = extensions.DeploymentStrategyType("randomType")
-	errorCases["supported values: Recreate, RollingUpdate"] = invalidStrategyDeployment
+	errorCases[`supported values: "Recreate", "RollingUpdate"`] = invalidStrategyDeployment
 
 	// rollingUpdate should be nil for recreate.
 	invalidRecreateDeployment := validDeployment()
@@ -1230,11 +1230,6 @@ func TestValidateDeployment(t *testing.T) {
 			t.Errorf("unexpected error: %q, expected: %q", errs[0].Error(), k)
 		}
 	}
-}
-
-func int64p(i int) *int64 {
-	i64 := int64(i)
-	return &i64
 }
 
 func TestValidateDeploymentStatus(t *testing.T) {
@@ -1334,15 +1329,6 @@ func TestValidateDeploymentStatus(t *testing.T) {
 			availableReplicas:  3,
 			observedGeneration: 1,
 			expectedErr:        true,
-		},
-		// TODO: Remove the following test case once we stop supporting upgrades from 1.5.
-		{
-			name:               "don't validate readyReplicas when it's zero",
-			replicas:           3,
-			readyReplicas:      0,
-			availableReplicas:  3,
-			observedGeneration: 1,
-			expectedErr:        false,
 		},
 		{
 			name:               "invalid collisionCount",
@@ -1481,8 +1467,6 @@ func TestValidateDeploymentRollback(t *testing.T) {
 		}
 	}
 }
-
-type ingressRules map[string]string
 
 func TestValidateIngress(t *testing.T) {
 	defaultBackend := extensions.IngressBackend{
@@ -1746,70 +1730,6 @@ func TestValidateIngressStatusUpdate(t *testing.T) {
 			if err.Field != s[0] || !strings.Contains(err.Error(), s[1]) {
 				t.Errorf("unexpected error: %q, expected: %q", err, k)
 			}
-		}
-	}
-}
-
-func TestValidateScale(t *testing.T) {
-	successCases := []extensions.Scale{
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "frontend",
-				Namespace: metav1.NamespaceDefault,
-			},
-			Spec: extensions.ScaleSpec{
-				Replicas: 1,
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "frontend",
-				Namespace: metav1.NamespaceDefault,
-			},
-			Spec: extensions.ScaleSpec{
-				Replicas: 10,
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "frontend",
-				Namespace: metav1.NamespaceDefault,
-			},
-			Spec: extensions.ScaleSpec{
-				Replicas: 0,
-			},
-		},
-	}
-
-	for _, successCase := range successCases {
-		if errs := ValidateScale(&successCase); len(errs) != 0 {
-			t.Errorf("expected success: %v", errs)
-		}
-	}
-
-	errorCases := []struct {
-		scale extensions.Scale
-		msg   string
-	}{
-		{
-			scale: extensions.Scale{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "frontend",
-					Namespace: metav1.NamespaceDefault,
-				},
-				Spec: extensions.ScaleSpec{
-					Replicas: -1,
-				},
-			},
-			msg: "must be greater than or equal to 0",
-		},
-	}
-
-	for _, c := range errorCases {
-		if errs := ValidateScale(&c.scale); len(errs) == 0 {
-			t.Errorf("expected failure for %s", c.msg)
-		} else if !strings.Contains(errs[0].Error(), c.msg) {
-			t.Errorf("unexpected error: %v, expected: %s", errs[0], c.msg)
 		}
 	}
 }
@@ -2418,6 +2338,10 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 				SupplementalGroups: extensions.SupplementalGroupsStrategyOptions{
 					Rule: extensions.SupplementalGroupsStrategyRunAsAny,
 				},
+				AllowedHostPaths: []extensions.AllowedHostPath{
+					{PathPrefix: "/foo/bar"},
+					{PathPrefix: "/baz/"},
+				},
 			},
 		}
 	}
@@ -2468,6 +2392,10 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 		{Min: 1, Max: -10},
 	}
 
+	wildcardAllowedCapAndRequiredDrop := validPSP()
+	wildcardAllowedCapAndRequiredDrop.Spec.RequiredDropCapabilities = []api.Capability{"foo"}
+	wildcardAllowedCapAndRequiredDrop.Spec.AllowedCapabilities = []api.Capability{extensions.AllowAllCapabilities}
+
 	requiredCapAddAndDrop := validPSP()
 	requiredCapAddAndDrop.Spec.DefaultAddCapabilities = []api.Capability{"foo"}
 	requiredCapAddAndDrop.Spec.RequiredDropCapabilities = []api.Capability{"foo"}
@@ -2492,14 +2420,35 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 	invalidSeccompDefault.Annotations = map[string]string{
 		seccomp.DefaultProfileAnnotationKey: "not-good",
 	}
+	invalidSeccompAllowAnyDefault := validPSP()
+	invalidSeccompAllowAnyDefault.Annotations = map[string]string{
+		seccomp.DefaultProfileAnnotationKey: "*",
+	}
 	invalidSeccompAllowed := validPSP()
 	invalidSeccompAllowed.Annotations = map[string]string{
 		seccomp.AllowedProfilesAnnotationKey: "docker/default,not-good",
 	}
 
+	invalidAllowedHostPathMissingPath := validPSP()
+	invalidAllowedHostPathMissingPath.Spec.AllowedHostPaths = []extensions.AllowedHostPath{
+		{PathPrefix: ""},
+	}
+
+	invalidAllowedHostPathBacksteps := validPSP()
+	invalidAllowedHostPathBacksteps.Spec.AllowedHostPaths = []extensions.AllowedHostPath{
+		{PathPrefix: "/dont/allow/backsteps/.."},
+	}
+
 	invalidDefaultAllowPrivilegeEscalation := validPSP()
 	pe := true
 	invalidDefaultAllowPrivilegeEscalation.Spec.DefaultAllowPrivilegeEscalation = &pe
+
+	emptyFlexDriver := validPSP()
+	emptyFlexDriver.Spec.Volumes = []extensions.FSType{extensions.FlexVolume}
+	emptyFlexDriver.Spec.AllowedFlexVolumes = []extensions.AllowedFlexVolume{{}}
+
+	nonEmptyFlexVolumes := validPSP()
+	nonEmptyFlexVolumes.Spec.AllowedFlexVolumes = []extensions.AllowedFlexVolume{{Driver: "example/driver"}}
 
 	type testCase struct {
 		psp         *extensions.PodSecurityPolicy
@@ -2510,42 +2459,42 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 		"no user options": {
 			psp:         noUserOptions,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, MustRunAsNonRoot, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "MustRunAsNonRoot", "RunAsAny"`,
 		},
 		"no selinux options": {
 			psp:         noSELinuxOptions,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "RunAsAny"`,
 		},
 		"no fsgroup options": {
 			psp:         noFSGroupOptions,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "RunAsAny"`,
 		},
 		"no sup group options": {
 			psp:         noSupplementalGroupsOptions,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "RunAsAny"`,
 		},
 		"invalid user strategy type": {
 			psp:         invalidUserStratType,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, MustRunAsNonRoot, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "MustRunAsNonRoot", "RunAsAny"`,
 		},
 		"invalid selinux strategy type": {
 			psp:         invalidSELinuxStratType,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "RunAsAny"`,
 		},
 		"invalid sup group strategy type": {
 			psp:         invalidSupGroupStratType,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "RunAsAny"`,
 		},
 		"invalid fs group strategy type": {
 			psp:         invalidFSGroupStratType,
 			errorType:   field.ErrorTypeNotSupported,
-			errorDetail: "supported values: MustRunAs, RunAsAny",
+			errorDetail: `supported values: "MustRunAs", "RunAsAny"`,
 		},
 		"invalid uid": {
 			psp:         invalidUIDPSP,
@@ -2571,6 +2520,11 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 			psp:         invalidRangeNegativeMax,
 			errorType:   field.ErrorTypeInvalid,
 			errorDetail: "max cannot be negative",
+		},
+		"non-empty required drops and all caps are allowed by a wildcard": {
+			psp:         wildcardAllowedCapAndRequiredDrop,
+			errorType:   field.ErrorTypeInvalid,
+			errorDetail: "must be empty when all capabilities are allowed by a wildcard",
 		},
 		"invalid required caps": {
 			psp:         requiredCapAddAndDrop,
@@ -2602,6 +2556,11 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 			errorType:   field.ErrorTypeInvalid,
 			errorDetail: "must be a valid seccomp profile",
 		},
+		"invalid seccomp allow any default profile": {
+			psp:         invalidSeccompAllowAnyDefault,
+			errorType:   field.ErrorTypeInvalid,
+			errorDetail: "must be a valid seccomp profile",
+		},
 		"invalid seccomp allowed profile": {
 			psp:         invalidSeccompAllowed,
 			errorType:   field.ErrorTypeInvalid,
@@ -2611,6 +2570,21 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 			psp:         invalidDefaultAllowPrivilegeEscalation,
 			errorType:   field.ErrorTypeInvalid,
 			errorDetail: "Cannot set DefaultAllowPrivilegeEscalation to true without also setting AllowPrivilegeEscalation to true",
+		},
+		"invalid allowed host path empty path": {
+			psp:         invalidAllowedHostPathMissingPath,
+			errorType:   field.ErrorTypeRequired,
+			errorDetail: "is required",
+		},
+		"invalid allowed host path with backsteps": {
+			psp:         invalidAllowedHostPathBacksteps,
+			errorType:   field.ErrorTypeInvalid,
+			errorDetail: "must not contain '..'",
+		},
+		"empty flex volume driver": {
+			psp:         emptyFlexDriver,
+			errorType:   field.ErrorTypeRequired,
+			errorDetail: "must specify a driver",
 		},
 	}
 
@@ -2683,7 +2657,7 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 	validSeccomp := validPSP()
 	validSeccomp.Annotations = map[string]string{
 		seccomp.DefaultProfileAnnotationKey:  "docker/default",
-		seccomp.AllowedProfilesAnnotationKey: "docker/default,unconfined,localhost/foo",
+		seccomp.AllowedProfilesAnnotationKey: "docker/default,unconfined,localhost/foo,*",
 	}
 
 	validDefaultAllowPrivilegeEscalation := validPSP()
@@ -2691,6 +2665,17 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 	validDefaultAllowPrivilegeEscalation.Spec.DefaultAllowPrivilegeEscalation = &pe
 	validDefaultAllowPrivilegeEscalation.Spec.AllowPrivilegeEscalation = true
 
+	flexvolumeWhenFlexVolumesAllowed := validPSP()
+	flexvolumeWhenFlexVolumesAllowed.Spec.Volumes = []extensions.FSType{extensions.FlexVolume}
+	flexvolumeWhenFlexVolumesAllowed.Spec.AllowedFlexVolumes = []extensions.AllowedFlexVolume{
+		{Driver: "example/driver1"},
+	}
+
+	flexvolumeWhenAllVolumesAllowed := validPSP()
+	flexvolumeWhenAllVolumesAllowed.Spec.Volumes = []extensions.FSType{extensions.All}
+	flexvolumeWhenAllVolumesAllowed.Spec.AllowedFlexVolumes = []extensions.AllowedFlexVolume{
+		{Driver: "example/driver2"},
+	}
 	successCases := map[string]struct {
 		psp *extensions.PodSecurityPolicy
 	}{
@@ -2720,6 +2705,12 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 		},
 		"valid defaultAllowPrivilegeEscalation as true": {
 			psp: validDefaultAllowPrivilegeEscalation,
+		},
+		"allow white-listed flexVolume when flex volumes are allowed": {
+			psp: flexvolumeWhenFlexVolumesAllowed,
+		},
+		"allow white-listed flexVolume when all volumes are allowed": {
+			psp: flexvolumeWhenAllVolumesAllowed,
 		},
 	}
 

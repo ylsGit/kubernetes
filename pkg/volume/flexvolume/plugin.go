@@ -19,6 +19,7 @@ package flexvolume
 import (
 	"fmt"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -32,7 +33,10 @@ import (
 	"k8s.io/utils/exec"
 )
 
-const flexVolumePluginName = "kubernetes.io/flexvolume"
+const (
+	flexVolumePluginName       = "kubernetes.io/flexvolume"
+	flexVolumePluginNamePrefix = "flexvolume-"
+)
 
 // FlexVolumePlugin object.
 type flexVolumePlugin struct {
@@ -42,8 +46,8 @@ type flexVolumePlugin struct {
 	runner     exec.Interface
 
 	sync.Mutex
-	capabilities        *driverCapabilities
 	unsupportedCommands []string
+	capabilities        DriverCapabilities
 }
 
 type flexVolumeAttachablePlugin struct {
@@ -53,7 +57,13 @@ type flexVolumeAttachablePlugin struct {
 var _ volume.AttachableVolumePlugin = &flexVolumeAttachablePlugin{}
 var _ volume.PersistentVolumePlugin = &flexVolumePlugin{}
 
-func NewFlexVolumePlugin(pluginDir, name string) (volume.VolumePlugin, error) {
+type PluginFactory interface {
+	NewFlexVolumePlugin(pluginDir, driverName string) (volume.VolumePlugin, error)
+}
+
+type pluginFactory struct{}
+
+func (pluginFactory) NewFlexVolumePlugin(pluginDir, name string) (volume.VolumePlugin, error) {
 	execPath := path.Join(pluginDir, name)
 
 	driverName := utilstrings.UnescapePluginName(name)
@@ -65,19 +75,16 @@ func NewFlexVolumePlugin(pluginDir, name string) (volume.VolumePlugin, error) {
 		unsupportedCommands: []string{},
 	}
 
-	// Retrieve driver reported capabilities
+	// Initialize the plugin and probe the capabilities
 	call := flexPlugin.NewDriverCall(initCmd)
 	ds, err := call.Run()
 	if err != nil {
 		return nil, err
 	}
+	flexPlugin.capabilities = *ds.Capabilities
 
-	driverCaps := ds.getDriverCapabilities()
-	flexPlugin.capabilities = driverCaps
-
-	// Check whether the plugin is attachable.
-	if driverCaps.attach {
-		// Plugin supports attach/detach by default, so return flexVolumeAttachablePlugin
+	if flexPlugin.capabilities.Attach {
+		// Plugin supports attach/detach, so return flexVolumeAttachablePlugin
 		return &flexVolumeAttachablePlugin{flexVolumePlugin: flexPlugin}, nil
 	} else {
 		return flexPlugin, nil
@@ -86,6 +93,7 @@ func NewFlexVolumePlugin(pluginDir, name string) (volume.VolumePlugin, error) {
 
 // Init is part of the volume.VolumePlugin interface.
 func (plugin *flexVolumePlugin) Init(host volume.VolumeHost) error {
+	plugin.host = host
 	// Hardwired 'success' as any errors from calling init() will be caught by NewFlexVolumePlugin()
 	return nil
 }
@@ -93,12 +101,16 @@ func (plugin *flexVolumePlugin) Init(host volume.VolumeHost) error {
 func (plugin *flexVolumePlugin) getExecutable() string {
 	parts := strings.Split(plugin.driverName, "/")
 	execName := parts[len(parts)-1]
-	return path.Join(plugin.execPath, execName)
+	execPath := path.Join(plugin.execPath, execName)
+	if runtime.GOOS == "windows" {
+		execPath = volume.GetWindowsPath(execPath)
+	}
+	return execPath
 }
 
 // Name is part of the volume.VolumePlugin interface.
 func (plugin *flexVolumePlugin) GetPluginName() string {
-	return "flexvolume-" + plugin.driverName
+	return flexVolumePluginNamePrefix + plugin.driverName
 }
 
 // GetVolumeName is part of the volume.VolumePlugin interface.
@@ -125,8 +137,11 @@ func (plugin *flexVolumePlugin) GetVolumeName(spec *volume.Spec) (string, error)
 
 // CanSupport is part of the volume.VolumePlugin interface.
 func (plugin *flexVolumePlugin) CanSupport(spec *volume.Spec) bool {
-	source, _ := getVolumeSource(spec)
-	return (source != nil) && (source.Driver == plugin.driverName)
+	sourceDriver, err := getDriver(spec)
+	if err != nil {
+		return false
+	}
+	return sourceDriver == plugin.driverName
 }
 
 // RequiresRemount is part of the volume.VolumePlugin interface.
@@ -149,10 +164,19 @@ func (plugin *flexVolumePlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ vo
 
 // newMounterInternal is the internal mounter routine to build the volume.
 func (plugin *flexVolumePlugin) newMounterInternal(spec *volume.Spec, pod *api.Pod, mounter mount.Interface, runner exec.Interface) (volume.Mounter, error) {
-	source, readOnly := getVolumeSource(spec)
+	sourceDriver, err := getDriver(spec)
+	if err != nil {
+		return nil, err
+	}
+
+	readOnly, err := getReadOnly(spec)
+	if err != nil {
+		return nil, err
+	}
+
 	return &flexVolumeMounter{
 		flexVolume: &flexVolume{
-			driverName:            source.Driver,
+			driverName:            sourceDriver,
 			execPath:              plugin.getExecutable(),
 			mounter:               mounter,
 			plugin:                plugin,

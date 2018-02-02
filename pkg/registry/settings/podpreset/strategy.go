@@ -21,7 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/storage/names"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	"k8s.io/kubernetes/pkg/api/pod"
 	"k8s.io/kubernetes/pkg/apis/settings"
 	"k8s.io/kubernetes/pkg/apis/settings/validation"
 )
@@ -33,7 +34,7 @@ type podPresetStrategy struct {
 }
 
 // Strategy is the default logic that applies when creating and updating Pod Preset objects.
-var Strategy = podPresetStrategy{api.Scheme, names.SimpleNameGenerator}
+var Strategy = podPresetStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 // NamespaceScoped returns true because all Pod Presets need to be within a namespace.
 func (podPresetStrategy) NamespaceScoped() bool {
@@ -44,12 +45,17 @@ func (podPresetStrategy) NamespaceScoped() bool {
 func (podPresetStrategy) PrepareForCreate(ctx genericapirequest.Context, obj runtime.Object) {
 	pip := obj.(*settings.PodPreset)
 	pip.Generation = 1
+
+	pod.DropDisabledVolumeMountsAlphaFields(pip.Spec.VolumeMounts)
 }
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
 func (podPresetStrategy) PrepareForUpdate(ctx genericapirequest.Context, obj, old runtime.Object) {
 	newPodPreset := obj.(*settings.PodPreset)
 	oldPodPreset := old.(*settings.PodPreset)
+
+	pod.DropDisabledVolumeMountsAlphaFields(oldPodPreset.Spec.VolumeMounts)
+	pod.DropDisabledVolumeMountsAlphaFields(newPodPreset.Spec.VolumeMounts)
 
 	// Update is not allowed
 	newPodPreset.Spec = oldPodPreset.Spec

@@ -41,7 +41,6 @@ import (
 	utiltesting "k8s.io/client-go/util/testing"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	containertesting "k8s.io/kubernetes/pkg/kubelet/container/testing"
-	kubetesting "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/network"
 	"k8s.io/kubernetes/pkg/kubelet/network/kubenet"
@@ -1398,7 +1397,7 @@ func TestGenerateRunCommand(t *testing.T) {
 
 	rkt := &Runtime{
 		nsenterPath: "/usr/bin/nsenter",
-		os:          &kubetesting.FakeOS{HostName: hostName},
+		os:          &containertesting.FakeOS{HostName: hostName},
 		config: &Config{
 			Path:            "/bin/rkt/rkt",
 			Stage1Image:     "/bin/rkt/stage1-coreos.aci",
@@ -1635,8 +1634,8 @@ func TestGarbageCollect(t *testing.T) {
 	fr := newFakeRktInterface()
 	fs := newFakeSystemd()
 	cli := newFakeRktCli()
-	fakeOS := kubetesting.NewFakeOS()
-	getter := newFakePodGetter()
+	fakeOS := containertesting.NewFakeOS()
+	deletionProvider := newFakePodDeletionProvider()
 	fug := newfakeUnitGetter()
 	frh := &containertesting.FakeRuntimeHelper{}
 
@@ -1644,7 +1643,7 @@ func TestGarbageCollect(t *testing.T) {
 		os:                  fakeOS,
 		cli:                 cli,
 		apisvc:              fr,
-		podGetter:           getter,
+		podDeletionProvider: deletionProvider,
 		systemd:             fs,
 		containerRefManager: kubecontainer.NewRefManager(),
 		unitGetter:          fug,
@@ -1830,7 +1829,7 @@ func TestGarbageCollect(t *testing.T) {
 
 		fr.pods = tt.pods
 		for _, p := range tt.apiPods {
-			getter.pods[p.UID] = p
+			deletionProvider.pods[p.UID] = struct{}{}
 		}
 
 		allSourcesReady := true
@@ -1862,7 +1861,7 @@ func TestGarbageCollect(t *testing.T) {
 		ctrl.Finish()
 		fakeOS.Removes = []string{}
 		fs.resetFailedUnits = []string{}
-		getter.pods = make(map[kubetypes.UID]*v1.Pod)
+		deletionProvider.pods = make(map[kubetypes.UID]struct{})
 	}
 }
 
@@ -2030,7 +2029,7 @@ func TestConstructSyslogIdentifier(t *testing.T) {
 }
 
 func TestGetPodSystemdServiceFiles(t *testing.T) {
-	fs := kubetesting.NewFakeOS()
+	fs := containertesting.NewFakeOS()
 	r := &Runtime{os: fs}
 
 	testCases := []struct {

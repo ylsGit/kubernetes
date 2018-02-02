@@ -23,10 +23,10 @@ import (
 	"sort"
 	"strconv"
 
-	apps "k8s.io/api/apps/v1beta1"
-	appsinformers "k8s.io/client-go/informers/apps/v1beta1"
+	apps "k8s.io/api/apps/v1"
+	appsinformers "k8s.io/client-go/informers/apps/v1"
 	clientset "k8s.io/client-go/kubernetes"
-	appslisters "k8s.io/client-go/listers/apps/v1beta1"
+	appslisters "k8s.io/client-go/listers/apps/v1"
 	hashutil "k8s.io/kubernetes/pkg/util/hash"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -37,7 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 )
@@ -51,7 +51,8 @@ func ControllerRevisionName(prefix string, hash uint32) string {
 	if len(prefix) > 223 {
 		prefix = prefix[:223]
 	}
-	return fmt.Sprintf("%s-%d", prefix, hash)
+
+	return fmt.Sprintf("%s-%s", prefix, rand.SafeEncodeString(strconv.FormatInt(int64(hash), 10)))
 }
 
 // NewControllerRevision returns a ControllerRevision with a ControllerRef pointing to parent and indicating that
@@ -243,18 +244,14 @@ func (rh *realHistory) CreateControllerRevision(parent metav1.Object, revision *
 	}
 
 	// Clone the input
-	any, err := scheme.Scheme.DeepCopy(revision)
-	if err != nil {
-		return nil, err
-	}
-	clone := any.(*apps.ControllerRevision)
+	clone := revision.DeepCopy()
 
 	// Continue to attempt to create the revision updating the name with a new hash on each iteration
 	for {
 		hash := HashControllerRevision(revision, collisionCount)
 		// Update the revisions name and labels
 		clone.Name = ControllerRevisionName(parent.GetName(), hash)
-		created, err := rh.client.AppsV1beta1().ControllerRevisions(parent.GetNamespace()).Create(clone)
+		created, err := rh.client.AppsV1().ControllerRevisions(parent.GetNamespace()).Create(clone)
 		if errors.IsAlreadyExists(err) {
 			*collisionCount++
 			continue
@@ -264,17 +261,13 @@ func (rh *realHistory) CreateControllerRevision(parent metav1.Object, revision *
 }
 
 func (rh *realHistory) UpdateControllerRevision(revision *apps.ControllerRevision, newRevision int64) (*apps.ControllerRevision, error) {
-	obj, err := scheme.Scheme.DeepCopy(revision)
-	if err != nil {
-		return nil, err
-	}
-	clone := obj.(*apps.ControllerRevision)
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	clone := revision.DeepCopy()
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if clone.Revision == newRevision {
 			return nil
 		}
 		clone.Revision = newRevision
-		updated, updateErr := rh.client.AppsV1beta1().ControllerRevisions(clone.Namespace).Update(clone)
+		updated, updateErr := rh.client.AppsV1().ControllerRevisions(clone.Namespace).Update(clone)
 		if updateErr == nil {
 			return nil
 		}
@@ -283,11 +276,7 @@ func (rh *realHistory) UpdateControllerRevision(revision *apps.ControllerRevisio
 		}
 		if updated, err := rh.lister.ControllerRevisions(clone.Namespace).Get(clone.Name); err == nil {
 			// make a copy so we don't mutate the shared cache
-			obj, err := scheme.Scheme.DeepCopy(updated)
-			if err != nil {
-				return err
-			}
-			clone = obj.(*apps.ControllerRevision)
+			clone = updated.DeepCopy()
 		}
 		return updateErr
 	})
@@ -295,7 +284,7 @@ func (rh *realHistory) UpdateControllerRevision(revision *apps.ControllerRevisio
 }
 
 func (rh *realHistory) DeleteControllerRevision(revision *apps.ControllerRevision) error {
-	return rh.client.AppsV1beta1().ControllerRevisions(revision.Namespace).Delete(revision.Name, nil)
+	return rh.client.AppsV1().ControllerRevisions(revision.Namespace).Delete(revision.Name, nil)
 }
 
 func (rh *realHistory) AdoptControllerRevision(parent metav1.Object, parentKind schema.GroupVersionKind, revision *apps.ControllerRevision) (*apps.ControllerRevision, error) {
@@ -304,7 +293,7 @@ func (rh *realHistory) AdoptControllerRevision(parent metav1.Object, parentKind 
 		return nil, fmt.Errorf("attempt to adopt revision owned by %v", owner)
 	}
 	// Use strategic merge patch to add an owner reference indicating a controller ref
-	return rh.client.AppsV1beta1().ControllerRevisions(parent.GetNamespace()).Patch(revision.GetName(),
+	return rh.client.AppsV1().ControllerRevisions(parent.GetNamespace()).Patch(revision.GetName(),
 		types.StrategicMergePatchType, []byte(fmt.Sprintf(
 			`{"metadata":{"ownerReferences":[{"apiVersion":"%s","kind":"%s","name":"%s","uid":"%s","controller":true,"blockOwnerDeletion":true}],"uid":"%s"}}`,
 			parentKind.GroupVersion().String(), parentKind.Kind,
@@ -313,7 +302,7 @@ func (rh *realHistory) AdoptControllerRevision(parent metav1.Object, parentKind 
 
 func (rh *realHistory) ReleaseControllerRevision(parent metav1.Object, revision *apps.ControllerRevision) (*apps.ControllerRevision, error) {
 	// Use strategic merge patch to add an owner reference indicating a controller ref
-	released, err := rh.client.AppsV1beta1().ControllerRevisions(revision.GetNamespace()).Patch(revision.GetName(),
+	released, err := rh.client.AppsV1().ControllerRevisions(revision.GetNamespace()).Patch(revision.GetName(),
 		types.StrategicMergePatchType,
 		[]byte(fmt.Sprintf(`{"metadata":{"ownerReferences":[{"$patch":"delete","uid":"%s"}],"uid":"%s"}}`, parent.GetUID(), revision.UID)))
 
@@ -375,11 +364,7 @@ func (fh *fakeHistory) CreateControllerRevision(parent metav1.Object, revision *
 	}
 
 	// Clone the input
-	any, err := scheme.Scheme.DeepCopy(revision)
-	if err != nil {
-		return nil, err
-	}
-	clone := any.(*apps.ControllerRevision)
+	clone := revision.DeepCopy()
 	clone.Namespace = parent.GetNamespace()
 
 	// Continue to attempt to create the revision updating the name with a new hash on each iteration
@@ -412,11 +397,7 @@ func (fh *fakeHistory) DeleteControllerRevision(revision *apps.ControllerRevisio
 }
 
 func (fh *fakeHistory) UpdateControllerRevision(revision *apps.ControllerRevision, newRevision int64) (*apps.ControllerRevision, error) {
-	obj, err := scheme.Scheme.DeepCopy(revision)
-	if err != nil {
-		return nil, err
-	}
-	clone := obj.(*apps.ControllerRevision)
+	clone := revision.DeepCopy()
 	clone.Revision = newRevision
 	return clone, fh.indexer.Update(clone)
 }
@@ -438,11 +419,7 @@ func (fh *fakeHistory) AdoptControllerRevision(parent metav1.Object, parentKind 
 	if !found {
 		return nil, errors.NewNotFound(apps.Resource("controllerrevisions"), revision.Name)
 	}
-	obj2, err := scheme.Scheme.DeepCopy(revision)
-	if err != nil {
-		return nil, err
-	}
-	clone := obj2.(*apps.ControllerRevision)
+	clone := revision.DeepCopy()
 	clone.OwnerReferences = append(clone.OwnerReferences, metav1.OwnerReference{
 		APIVersion:         parentKind.GroupVersion().String(),
 		Kind:               parentKind.Kind,
@@ -467,11 +444,7 @@ func (fh *fakeHistory) ReleaseControllerRevision(parent metav1.Object, revision 
 	if !found {
 		return nil, nil
 	}
-	obj2, err := scheme.Scheme.DeepCopy(revision)
-	if err != nil {
-		return nil, err
-	}
-	clone := obj2.(*apps.ControllerRevision)
+	clone := revision.DeepCopy()
 	refs := clone.OwnerReferences
 	clone.OwnerReferences = nil
 	for i := range refs {

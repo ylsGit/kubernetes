@@ -44,11 +44,12 @@ var (
 func NewCmdRolloutHistory(f cmdutil.Factory, out io.Writer) *cobra.Command {
 	options := &resource.FilenameOptions{}
 
-	validArgs := []string{"deployment", "daemonset"}
+	validArgs := []string{"deployment", "daemonset", "statefulset"}
 	argAliases := kubectl.ResourceAliases(validArgs)
 
 	cmd := &cobra.Command{
-		Use:     "history (TYPE NAME | TYPE/NAME) [flags]",
+		Use: "history (TYPE NAME | TYPE/NAME) [flags]",
+		DisableFlagsInUseLine: true,
 		Short:   i18n.T("View rollout history"),
 		Long:    history_long,
 		Example: history_example,
@@ -79,7 +80,8 @@ func RunHistory(f cmdutil.Factory, cmd *cobra.Command, out io.Writer, args []str
 		return err
 	}
 
-	r := f.NewBuilder(true).
+	r := f.NewBuilder().
+		Internal().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, options).
 		ResourceTypeOrNameArgs(true, args...).

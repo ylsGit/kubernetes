@@ -160,7 +160,7 @@ type Runtime struct {
 	dockerKeyring credentialprovider.DockerKeyring
 
 	containerRefManager *kubecontainer.RefManager
-	podGetter           podGetter
+	podDeletionProvider podDeletionProvider
 	runtimeHelper       kubecontainer.RuntimeHelper
 	recorder            record.EventRecorder
 	livenessManager     proberesults.Manager
@@ -201,9 +201,9 @@ type podServiceDirective struct {
 var _ kubecontainer.Runtime = &Runtime{}
 var _ kubecontainer.DirectStreamingRuntime = &Runtime{}
 
-// TODO(yifan): This duplicates the podGetter in dockertools.
-type podGetter interface {
-	GetPodByUID(kubetypes.UID) (*v1.Pod, bool)
+// podDeletionProvider can determine if a pod is deleted
+type podDeletionProvider interface {
+	IsPodDeleted(kubetypes.UID) bool
 }
 
 // cliInterface wrapps the command line calls for testing purpose.
@@ -228,7 +228,7 @@ func New(
 	runtimeHelper kubecontainer.RuntimeHelper,
 	recorder record.EventRecorder,
 	containerRefManager *kubecontainer.RefManager,
-	podGetter podGetter,
+	podDeletionProvider podDeletionProvider,
 	livenessManager proberesults.Manager,
 	httpClient types.HttpGetter,
 	networkPlugin network.NetworkPlugin,
@@ -285,7 +285,7 @@ func New(
 		config:              config,
 		dockerKeyring:       credentialprovider.NewDockerKeyring(),
 		containerRefManager: containerRefManager,
-		podGetter:           podGetter,
+		podDeletionProvider: podDeletionProvider,
 		runtimeHelper:       runtimeHelper,
 		recorder:            recorder,
 		livenessManager:     livenessManager,
@@ -842,7 +842,7 @@ func (r *Runtime) newAppcRuntimeApp(pod *v1.Pod, podIP string, c v1.Container, r
 	}
 
 	// TODO: determine how this should be handled for rkt
-	opts, _, err := r.runtimeHelper.GenerateRunContainerOptions(pod, &c, podIP)
+	opts, err := r.runtimeHelper.GenerateRunContainerOptions(pod, &c, podIP)
 	if err != nil {
 		return err
 	}
@@ -1041,17 +1041,17 @@ func (r *Runtime) generateRunCommand(pod *v1.Pod, uuid, networkNamespaceID strin
 		}
 	} else {
 		// Setup DNS.
-		dnsServers, dnsSearches, _, err := r.runtimeHelper.GetClusterDNS(pod)
+		dnsConfig, err := r.runtimeHelper.GetPodDNS(pod)
 		if err != nil {
 			return "", err
 		}
-		for _, server := range dnsServers {
+		for _, server := range dnsConfig.Servers {
 			runPrepared = append(runPrepared, fmt.Sprintf("--dns=%s", server))
 		}
-		for _, search := range dnsSearches {
+		for _, search := range dnsConfig.Searches {
 			runPrepared = append(runPrepared, fmt.Sprintf("--dns-search=%s", search))
 		}
-		if len(dnsServers) > 0 || len(dnsSearches) > 0 {
+		if len(dnsConfig.Servers) > 0 || len(dnsConfig.Searches) > 0 {
 			runPrepared = append(runPrepared, fmt.Sprintf("--dns-opt=%s", defaultDNSOption))
 		}
 
@@ -2020,8 +2020,7 @@ func (r *Runtime) GarbageCollect(gcPolicy kubecontainer.ContainerGCPolicy, allSo
 				removeCandidates = append(removeCandidates, pod)
 				continue
 			}
-			_, found := r.podGetter.GetPodByUID(uid)
-			if !found && allSourcesReady {
+			if r.podDeletionProvider.IsPodDeleted(uid) && allSourcesReady {
 				removeCandidates = append(removeCandidates, pod)
 				continue
 			}

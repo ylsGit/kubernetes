@@ -29,13 +29,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/openstack"
-	"k8s.io/kubernetes/pkg/cloudprovider/providers/rackspace"
 	"k8s.io/kubernetes/pkg/util/keymutex"
 	"k8s.io/kubernetes/pkg/util/mount"
 	kstrings "k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
+)
+
+const (
+	DefaultCloudConfigPath = "/etc/kubernetes/cloud-config"
 )
 
 // This is the primary entrypoint for volume plugins.
@@ -47,15 +50,17 @@ type CinderProvider interface {
 	AttachDisk(instanceID, volumeID string) (string, error)
 	DetachDisk(instanceID, volumeID string) error
 	DeleteVolume(volumeID string) error
-	CreateVolume(name string, size int, vtype, availability string, tags *map[string]string) (string, string, error)
+	CreateVolume(name string, size int, vtype, availability string, tags *map[string]string) (string, string, bool, error)
 	GetDevicePath(volumeID string) string
 	InstanceID() (string, error)
 	GetAttachmentDiskPath(instanceID, volumeID string) (string, error)
 	OperationPending(diskName string) (bool, string, error)
 	DiskIsAttached(instanceID, volumeID string) (bool, error)
-	DisksAreAttached(instanceID string, volumeIDs []string) (map[string]bool, error)
+	DiskIsAttachedByName(nodeName types.NodeName, volumeID string) (bool, string, error)
+	DisksAreAttachedByName(nodeName types.NodeName, volumeIDs []string) (map[string]bool, error)
 	ShouldTrustDevicePath() bool
 	Instances() (cloudprovider.Instances, bool)
+	ExpandVolume(volumeID string, oldSize resource.Quantity, newSize resource.Quantity) (resource.Quantity, error)
 }
 
 type cinderPlugin struct {
@@ -187,30 +192,31 @@ func (plugin *cinderPlugin) newProvisionerInternal(options volume.VolumeOptions,
 	}, nil
 }
 
-func getCloudProvider(cloudProvider cloudprovider.Interface) (CinderProvider, error) {
-	if cloud, ok := cloudProvider.(*rackspace.Rackspace); ok && cloud != nil {
-		return cloud, nil
-	}
-	if cloud, ok := cloudProvider.(*openstack.OpenStack); ok && cloud != nil {
-		return cloud, nil
-	}
-	return nil, fmt.Errorf("wrong cloud type")
-}
-
 func (plugin *cinderPlugin) getCloudProvider() (CinderProvider, error) {
 	cloud := plugin.host.GetCloudProvider()
 	if cloud == nil {
-		glog.Errorf("Cloud provider not initialized properly")
-		return nil, errors.New("Cloud provider not initialized properly")
+		if _, err := os.Stat(DefaultCloudConfigPath); err == nil {
+			var config *os.File
+			config, err = os.Open(DefaultCloudConfigPath)
+			if err != nil {
+				return nil, errors.New(fmt.Sprintf("unable to load OpenStack configuration from default path : %v", err))
+			} else {
+				defer config.Close()
+				cloud, err = cloudprovider.GetCloudProvider(openstack.ProviderName, config)
+				if err != nil {
+					return nil, errors.New(fmt.Sprintf("unable to create OpenStack cloud provider from default path : %v", err))
+				}
+			}
+		} else {
+			return nil, errors.New(fmt.Sprintf("OpenStack cloud provider was not initialized properly : %v", err))
+		}
 	}
 
 	switch cloud := cloud.(type) {
-	case *rackspace.Rackspace:
-		return cloud, nil
 	case *openstack.OpenStack:
 		return cloud, nil
 	default:
-		return nil, errors.New("Invalid cloud provider: expected OpenStack or Rackspace.")
+		return nil, errors.New("invalid cloud provider: expected OpenStack")
 	}
 }
 
@@ -231,6 +237,31 @@ func (plugin *cinderPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*
 		},
 	}
 	return volume.NewSpecFromVolume(cinderVolume), nil
+}
+
+var _ volume.ExpandableVolumePlugin = &cinderPlugin{}
+
+func (plugin *cinderPlugin) ExpandVolumeDevice(spec *volume.Spec, newSize resource.Quantity, oldSize resource.Quantity) (resource.Quantity, error) {
+	cinder, _, err := getVolumeSource(spec)
+	if err != nil {
+		return oldSize, err
+	}
+	cloud, err := plugin.getCloudProvider()
+	if err != nil {
+		return oldSize, err
+	}
+
+	expandedSize, err := cloud.ExpandVolume(cinder.VolumeID, oldSize, newSize)
+	if err != nil {
+		return oldSize, err
+	}
+
+	glog.V(2).Infof("volume %s expanded to new size %d successfully", cinder.VolumeID, int(newSize.Value()))
+	return expandedSize, nil
+}
+
+func (plugin *cinderPlugin) RequiresFSResize() bool {
+	return true
 }
 
 // Abstract interface to PD operations.
@@ -275,13 +306,6 @@ type cinderVolume struct {
 	volume.MetricsNil
 }
 
-func detachDiskLogError(cd *cinderVolume) {
-	err := cd.manager.DetachDisk(&cinderVolumeUnmounter{cd})
-	if err != nil {
-		glog.Warningf("Failed to detach disk: %v (%v)", cd, err)
-	}
-}
-
 func (b *cinderVolumeMounter) GetAttributes() volume.Attributes {
 	return volume.Attributes{
 		ReadOnly:        b.readOnly,
@@ -308,7 +332,6 @@ func (b *cinderVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 	b.plugin.volumeLocks.LockKey(b.pdName)
 	defer b.plugin.volumeLocks.UnlockKey(b.pdName)
 
-	// TODO: handle failed mounts here.
 	notmnt, err := b.mounter.IsLikelyNotMountPoint(dir)
 	if err != nil && !os.IsNotExist(err) {
 		glog.Errorf("Cannot validate mount point: %s %v", dir, err)
@@ -326,9 +349,7 @@ func (b *cinderVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 	}
 
 	if err := os.MkdirAll(dir, 0750); err != nil {
-		// TODO: we should really eject the attach/detach out into its own control loop.
 		glog.V(4).Infof("Could not create directory %s: %v", dir, err)
-		detachDiskLogError(b.cinderVolume)
 		return err
 	}
 
@@ -359,8 +380,6 @@ func (b *cinderVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 			}
 		}
 		os.Remove(dir)
-		// TODO: we should really eject the attach/detach out into its own control loop.
-		detachDiskLogError(b.cinderVolume)
 		glog.Errorf("Failed to mount %s: %v", dir, err)
 		return err
 	}
@@ -511,6 +530,7 @@ func (c *cinderVolumeProvisioner) Provision() (*v1.PersistentVolume, error) {
 					ReadOnly: false,
 				},
 			},
+			MountOptions: c.options.MountOptions,
 		},
 	}
 	if len(c.options.PVC.Spec.AccessModes) == 0 {

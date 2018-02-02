@@ -29,6 +29,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
 var _ = framework.KubeDescribe("Security Context", func() {
@@ -59,7 +60,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		}
 		createAndWaitHostPidPod := func(podName string, hostPID bool) {
 			podClient.Create(makeHostPidPod(podName,
-				"gcr.io/google_containers/busybox:1.24",
+				busyboxImage,
 				[]string{"sh", "-c", "pidof nginx || true"},
 				hostPID,
 			))
@@ -71,7 +72,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		BeforeEach(func() {
 			nginxPodName := "nginx-hostpid-" + string(uuid.NewUUID())
 			podClient.CreateSync(makeHostPidPod(nginxPodName,
-				"gcr.io/google_containers/nginx-slim:0.7",
+				imageutils.GetE2EImage(imageutils.NginxSlim),
 				nil,
 				true,
 			))
@@ -139,7 +140,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		}
 		createAndWaitHostIPCPod := func(podName string, hostNetwork bool) {
 			podClient.Create(makeHostIPCPod(podName,
-				"gcr.io/google_containers/busybox:1.24",
+				imageutils.GetE2EImage(imageutils.IpcUtils),
 				[]string{"sh", "-c", "ipcs -m | awk '{print $2}'"},
 				hostNetwork,
 			))
@@ -149,7 +150,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 
 		hostSharedMemoryID := ""
 		BeforeEach(func() {
-			output, err := exec.Command("sh", "-c", "ipcmk -M 1M | awk '{print $NF}'").Output()
+			output, err := exec.Command("sh", "-c", "ipcmk -M 1048576 | awk '{print $NF}'").Output()
 			if err != nil {
 				framework.Failf("Failed to create the shared memory on the host: %v", err)
 			}
@@ -158,30 +159,30 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		})
 
 		It("should show the shared memory ID in the host IPC containers", func() {
-			busyboxPodName := "busybox-hostipc-" + string(uuid.NewUUID())
-			createAndWaitHostIPCPod(busyboxPodName, true)
-			logs, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, busyboxPodName, busyboxPodName)
+			ipcutilsPodName := "ipcutils-hostipc-" + string(uuid.NewUUID())
+			createAndWaitHostIPCPod(ipcutilsPodName, true)
+			logs, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, ipcutilsPodName, ipcutilsPodName)
 			if err != nil {
-				framework.Failf("GetPodLogs for pod %q failed: %v", busyboxPodName, err)
+				framework.Failf("GetPodLogs for pod %q failed: %v", ipcutilsPodName, err)
 			}
 
 			podSharedMemoryIDs := strings.TrimSpace(logs)
-			framework.Logf("Got shared memory IDs %q from pod %q", podSharedMemoryIDs, busyboxPodName)
+			framework.Logf("Got shared memory IDs %q from pod %q", podSharedMemoryIDs, ipcutilsPodName)
 			if !strings.Contains(podSharedMemoryIDs, hostSharedMemoryID) {
 				framework.Failf("hostIPC container should show shared memory IDs on host")
 			}
 		})
 
 		It("should not show the shared memory ID in the non-hostIPC containers", func() {
-			busyboxPodName := "busybox-non-hostipc-" + string(uuid.NewUUID())
-			createAndWaitHostIPCPod(busyboxPodName, false)
-			logs, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, busyboxPodName, busyboxPodName)
+			ipcutilsPodName := "ipcutils-non-hostipc-" + string(uuid.NewUUID())
+			createAndWaitHostIPCPod(ipcutilsPodName, false)
+			logs, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, ipcutilsPodName, ipcutilsPodName)
 			if err != nil {
-				framework.Failf("GetPodLogs for pod %q failed: %v", busyboxPodName, err)
+				framework.Failf("GetPodLogs for pod %q failed: %v", ipcutilsPodName, err)
 			}
 
 			podSharedMemoryIDs := strings.TrimSpace(logs)
-			framework.Logf("Got shared memory IDs %q from pod %q", podSharedMemoryIDs, busyboxPodName)
+			framework.Logf("Got shared memory IDs %q from pod %q", podSharedMemoryIDs, ipcutilsPodName)
 			if strings.Contains(podSharedMemoryIDs, hostSharedMemoryID) {
 				framework.Failf("non-hostIPC container should not show shared memory IDs on host")
 			}
@@ -219,7 +220,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		listListeningPortsCommand := []string{"sh", "-c", "netstat -ln"}
 		createAndWaitHostNetworkPod := func(podName string, hostNetwork bool) {
 			podClient.Create(makeHostNetworkPod(podName,
-				"gcr.io/google_containers/busybox:1.24",
+				busyboxImage,
 				listListeningPortsCommand,
 				hostNetwork,
 			))
@@ -229,8 +230,9 @@ var _ = framework.KubeDescribe("Security Context", func() {
 
 		listeningPort := ""
 		var l net.Listener
+		var err error
 		BeforeEach(func() {
-			l, err := net.Listen("tcp", ":0")
+			l, err = net.Listen("tcp", ":0")
 			if err != nil {
 				framework.Failf("Failed to open a new tcp port: %v", err)
 			}
@@ -298,7 +300,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		createAndWaitUserPod := func(userid int64) {
 			podName := fmt.Sprintf("busybox-user-%d-%s", userid, uuid.NewUUID())
 			podClient.Create(makeUserPod(podName,
-				"gcr.io/google_containers/busybox:1.24",
+				busyboxImage,
 				[]string{"sh", "-c", fmt.Sprintf("test $(id -u) -eq %d", userid)},
 				userid,
 			))
@@ -339,7 +341,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		createAndWaitUserPod := func(readOnlyRootFilesystem bool) string {
 			podName := fmt.Sprintf("busybox-readonly-%v-%s", readOnlyRootFilesystem, uuid.NewUUID())
 			podClient.Create(makeUserPod(podName,
-				"gcr.io/google_containers/busybox:1.24",
+				"busybox",
 				[]string{"sh", "-c", "touch checkfile"},
 				readOnlyRootFilesystem,
 			))
@@ -371,6 +373,18 @@ var _ = framework.KubeDescribe("Security Context", func() {
 				if !isSupported {
 					framework.Skipf("Skipping because no_new_privs is not supported in this docker")
 				}
+				// It turns out SELinux policy in RHEL 7 does not play well with
+				// the "NoNewPrivileges" flag. So let's skip this test when running
+				// with SELinux support enabled.
+				//
+				// TODO(filbranden): Remove this after the fix for
+				// https://github.com/projectatomic/container-selinux/issues/45
+				// has been backported to RHEL 7 (expected on RHEL 7.5)
+				selinuxEnabled, err := isDockerSELinuxSupportEnabled()
+				framework.ExpectNoError(err)
+				if selinuxEnabled {
+					framework.Skipf("Skipping because Docker daemon is running with SELinux support enabled")
+				}
 			}
 		})
 
@@ -383,7 +397,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 					RestartPolicy: v1.RestartPolicyNever,
 					Containers: []v1.Container{
 						{
-							Image: "gcr.io/google_containers/nonewprivs:1.2",
+							Image: imageutils.GetE2EImage(imageutils.Nonewprivs),
 							Name:  podName,
 							SecurityContext: &v1.SecurityContext{
 								AllowPrivilegeEscalation: allowPrivilegeEscalation,
@@ -457,7 +471,7 @@ var _ = framework.KubeDescribe("Security Context", func() {
 		createAndWaitUserPod := func(privileged bool) string {
 			podName := fmt.Sprintf("busybox-privileged-%v-%s", privileged, uuid.NewUUID())
 			podClient.Create(makeUserPod(podName,
-				"gcr.io/google_containers/busybox:1.24",
+				busyboxImage,
 				[]string{"sh", "-c", "ip link add dummy0 type dummy || true"},
 				privileged,
 			))
